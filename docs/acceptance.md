@@ -37,10 +37,13 @@ Windows recording evidence: [actual UltraLite channel 1 capture and independent 
 
 Run these on the local Windows build. Repeat on macOS and Linux before claiming their native UI is validated. Record screenshots or observations for the app's idle, recording, finalizing, and error states.
 
-- [x] The compact dark window is approximately 520 by 300 logical pixels. Labels, controls, status messages, and the next filename remain readable at the tested desktop scaling.
+- [x] The dark content area is 600 by 400 logical pixels plus the native title bar. The 15-pixel body/control/status text, 14-pixel labels, and 13-pixel secondary text remain readable at Windows 150% scaling, with reserved footer space and no observed overlap.
+- [x] The 32-pixel monospaced HH:MM:SS timer is centered in a dedicated 60-pixel-high area. Native live capture and controlled boundary values retain centered alignment across seconds, minutes, and hours.
 - [x] Target-folder and recording-prefix fields appear above audio-driver, input-device, mode, and explicit channel controls.
 - [ ] One peak bar appears for mono and two for a stereo pair. Each responds to its selected channel while idle and recording, reports dBFS, and briefly indicates clipping.
-- [x] The Record button becomes Stop during capture. Elapsed time advances. The displayed negotiated input stream rate and fixed 16-bit output match the recorded FLAC.
+- [x] The 140 by 64 Record dot becomes a labelled Stop square during capture. Hover, pressed, focus, disabled, and recording states remain readable. Finishing... was observed disabled at the same bounds before Saved. The displayed input stream rate and fixed 16-bit output match the inspected FLAC.
+- [x] Full-window idle, recording, stereo, error, hover, pressed, selector focus, popup, and long-path evidence has been refreshed for the Windows 150% layout. Finalization has a native observation because it completes between screenshot frames.
+- [ ] Repeat readability, clipping, popup, focus, and long-value checks at other supported desktop scales and on macOS/Linux. The broader DPI matrix is incomplete.
 - [ ] Mono channel selection captures the chosen channel. Stereo left/right selectors are separate and reject duplicate channels.
 - [ ] The target folder, recording prefix, audio driver, input device, and channel selectors lock during capture. Another take stays disabled until finalization completes.
 - [ ] Space toggles Record/Stop when no editable control has focus. Typing Space in the prefix or folder field and using selectors does not start or stop a take.
