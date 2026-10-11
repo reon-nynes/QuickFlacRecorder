@@ -1,0 +1,13 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["src"],
+  "locale": "en",
+  "canonicalMap": "DESIGN.md",
+  "requiredCapabilities": ["Select/Listbox", "Form"],
+  "ownership": {"Select/Listbox": "authored"},
+  "requiredCommands": [],
+  "evidence": {
+    "nativeAcceptance": "docs/native-acceptance.md",
+    "sessionBehavior": "tests/RecordingSessionTests.cpp"
+  }
+}
