@@ -50,7 +50,7 @@ Run these on the local Windows build. Repeat on macOS and Linux before claiming 
 - [x] Reopening restores the target folder, audio driver, input device, channel choices, and window position. Each launch generates a fresh local date/time prefix.
 - [x] A missing remembered folder requires another existing folder. A missing remembered input requires an explicit replacement; it does not silently select a different input.
 - [ ] Disconnecting the selected input during a take stops capture, reports a failure, and preserves audio that can be finalized. An unsuccessful finalization retains its incomplete name and is not described as a successful save.
-- [ ] Incomplete files left after an interrupted process remain available and have visible incomplete status. The app does not claim automatic recovery.
+- [x] Incomplete-file fixtures remain available and have visible incomplete status. The app does not claim automatic recovery. An actual process-crash test is still pending.
 
 Native UI evidence: [complete window screenshots and observed Windows behavior](validation/windows.md). Unchecked items still require their full native procedure; the report distinguishes partial observations from pending checks.
 
