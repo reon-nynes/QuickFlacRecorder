@@ -65,7 +65,10 @@ void rejectsUnsafeConfigurations()
     auto missing = config(folder);
     missing.targetFolder = folder.file.getChildFile("does-not-exist");
     require(session.configure(missing).failed(), "missing target folder is rejected");
+    require(session.snapshot().error.code == qfr::ErrorCode::folderMissing,
+            "missing target folder has a stable result independent of wording");
     require(!missing.targetFolder.exists(), "missing target folder was not created");
+    require(session.configure(config(folder)).wasOk(), "explicit folder correction recovers recording");
     auto stereo = config(folder);
     stereo.rightInputChannel = stereo.leftInputChannel;
     require(session.configure(stereo).failed(), "stereo pair requires distinct input channels");
@@ -253,7 +256,8 @@ void periodicDiskFlushFailureStopsAndRetainsAnIncompleteRecording()
     session.requestStop(); session.waitForStop();
     const auto outcome = session.snapshot();
     require(outcome.state == qfr::RecordingSession::State::failed && outcome.incomplete
-            && outcome.message.contains("flush") && outcome.message.contains("incomplete")
+            && outcome.failureReason == qfr::RecordingSession::FailureReason::diskFlush
+            && outcome.finalization == qfr::RecordingSession::FinalizationOutcome::diskFlushFailed
             && partial.existsAsFile() && !folder.file.getChildFile("take_01.flac").exists(),
             "periodic disk flush failure reports the failed flush and retains an unpromoted incomplete recording");
 }
@@ -267,20 +271,27 @@ void failedInputPreservesFinalizableAudioAndReportsIncompleteFinalization()
     const float* inputs[] { source.data() };
     session.processInput(inputs, 1, 512);
     session.inputLost(); session.waitForStop();
+    session.retainInputDiagnostic(juce::String::fromUTF8("设备{error}"));
     auto outcome = session.snapshot();
-    require(outcome.state == qfr::RecordingSession::State::failed && !outcome.incomplete && outcome.message.contains("lost"), "input loss reports a failed take with finalized captured audio");
+    require(outcome.state == qfr::RecordingSession::State::failed && !outcome.incomplete && outcome.failureReason == qfr::RecordingSession::FailureReason::inputLost
+            && outcome.finalization == qfr::RecordingSession::FinalizationOutcome::finalized, "input loss reports a failed take with finalized captured audio");
     require(decode(outcome.recordingFile)->lengthInSamples == 512, "input loss drains captured frames");
+    require(outcome.inputDetail == juce::String::fromUTF8("设备{error}"), "native input detail survives independently of translated presentation");
+    session.retainInputDiagnostic("late notification");
+    require(session.snapshot().inputDetail == outcome.inputDetail, "later input diagnostics do not replace the first terminal cause");
     disk->failMetadata = true;
     require(session.start().wasOk(), "second input-loss recording");
     session.processInput(inputs, 1, 512);
     session.inputLost(); session.waitForStop();
     outcome = session.snapshot();
     require(outcome.state == qfr::RecordingSession::State::failed && outcome.incomplete && outcome.recordingFile.getFileName() == "take_02.partial.flac", "failed finalization retains partial file");
-    require(outcome.message.contains("incomplete") && !outcome.message.contains("was finalized"), "compound input-loss/finalization failure reports retained incomplete audio");
+    require(outcome.failureReason == qfr::RecordingSession::FailureReason::inputLost
+            && outcome.finalization == qfr::RecordingSession::FinalizationOutcome::writerFailed, "compound input-loss/finalization failure reports retained incomplete audio");
     require(!folder.file.getChildFile("take_02.flac").exists(), "failed finalization is never promoted");
-    auto failureMessage = outcome.message;
+    auto failureReason = outcome.failureReason; auto finalization = outcome.finalization; auto retained = outcome.recordingFile;
     require(session.refreshPreview().wasOk(), "refresh next filename after failure");
-    require(session.snapshot().message == failureMessage && session.snapshot().state == qfr::RecordingSession::State::failed,
+    require(session.snapshot().failureReason == failureReason && session.snapshot().finalization == finalization
+            && session.snapshot().recordingFile == retained && session.snapshot().state == qfr::RecordingSession::State::failed,
             "passive preview refresh preserves failure explanation");
     disk->failWrites = false; disk->failMetadata = false; disk->corruptMetadata = true;
     require(session.start().wasOk(), "start input-loss recording with corrupt final metadata");
@@ -308,11 +319,30 @@ void driverDiscontinuityFailsTheTakeAndPreservesAcceptedAudio()
     session.requestStop(); session.waitForStop();
     const auto outcome = session.snapshot();
     require(outcome.state == qfr::RecordingSession::State::failed && !outcome.incomplete
-            && outcome.message.contains("discontinuity") && outcome.message.contains("missing samples")
-            && !outcome.message.contains("Saved") && !outcome.message.contains("lost"),
+            && outcome.failureReason == qfr::RecordingSession::FailureReason::discontinuity
+            && outcome.finalization == qfr::RecordingSession::FinalizationOutcome::finalized,
             "driver missing samples report a specific failed take with finalized captured audio");
     require(decode(outcome.recordingFile)->lengthInSamples == 512,
             "discontinuity drains accepted frames and rejects later potentially discontinuous audio");
+}
+void inputInterruptionAndFinalFlushFailureRemainSeparate()
+{
+    Folder folder;
+    auto disk = std::make_shared<DiskControl>();
+    qfr::RecordingSession session(diskOptions(disk));
+    require(session.configure(config(folder, juce::String::fromUTF8("录音{path}"))).wasOk() && session.start().wasOk(), "start compound flush failure");
+    const auto partial = session.snapshot().recordingFile;
+    disk->failNextFlush = true;
+    session.inputDiscontinuity(); session.waitForStop();
+    const auto outcome = session.snapshot();
+    require(outcome.state == qfr::RecordingSession::State::failed && outcome.incomplete && outcome.recordingFile == partial
+        && outcome.failureReason == qfr::RecordingSession::FailureReason::discontinuity
+        && outcome.finalization == qfr::RecordingSession::FinalizationOutcome::diskFlushFailed
+        && outcome.error.detail == "disk flush refused" && partial.existsAsFile(), "retain both interruption and final flush outcome with verbatim diagnostic");
+    session.refreshPreview(); session.requestStop(); session.inputLost();
+    require(session.snapshot().failureReason == outcome.failureReason && session.snapshot().finalization == outcome.finalization
+        && session.snapshot().recordingFile == partial && session.snapshot().error.detail == outcome.error.detail,
+        "late notifications and preview retain compound terminal result");
 }
 void finalizationLocksAnotherTakeAndPromotionDoesNotReplace()
 {
@@ -342,7 +372,7 @@ void finalizationLocksAnotherTakeAndPromotionDoesNotReplace()
     require(entered && state.state == qfr::RecordingSession::State::finalizing && partialExists && !finalExists, "partial file and locked finalizing state until FLAC finishes");
     require(canStart.failed() && canChange.failed(), "another take and configuration are unavailable during finalization");
     state = session.snapshot();
-    require(state.state == qfr::RecordingSession::State::failed && state.incomplete && state.message.contains("incomplete"), "promotion conflict retains incomplete recording and reports failure");
+    require(state.state == qfr::RecordingSession::State::failed && state.incomplete && state.finalization == qfr::RecordingSession::FinalizationOutcome::promotionFailed, "promotion conflict retains incomplete recording and reports failure");
     require(folder.file.getChildFile("take_01.flac").loadFileAsString() == "existing final recording", "promotion never replaces existing final recording");
     require(decode(state.recordingFile)->lengthInSamples == 0, "finalized partial is inspectable after promotion conflict");
 }
@@ -358,7 +388,7 @@ void overflowAndWriterFailuresStopWithoutClaimingSuccess()
     session.processInput(inputs, 1, 256);
     session.waitForStop();
     auto state = session.snapshot();
-    require(state.state == qfr::RecordingSession::State::failed && state.message.contains("overflow"), "buffer overflow stops and reports failed capture");
+    require(state.state == qfr::RecordingSession::State::failed && state.failureReason == qfr::RecordingSession::FailureReason::overflow, "buffer overflow stops and reports failed capture");
     require(!state.incomplete && decode(state.recordingFile)->lengthInSamples == 256, "overflow preserves accepted frames and does not silently accept subsequent input");
     auto disk = std::make_shared<DiskControl>();
     qfr::RecordingSession broken(diskOptions(disk));
@@ -370,7 +400,7 @@ void overflowAndWriterFailuresStopWithoutClaimingSuccess()
     broken.requestStop(); broken.waitForStop();
     state = broken.snapshot();
     require(state.state == qfr::RecordingSession::State::failed && state.incomplete && state.recordingFile.existsAsFile(), "disk writer failure retains incomplete recording");
-    require(!folder.file.getChildFile("writer_01.flac").exists() && state.message.contains("failed"), "writer failure cannot claim a successful save");
+    require(!folder.file.getChildFile("writer_01.flac").exists() && state.failureReason == qfr::RecordingSession::FailureReason::writer, "writer failure cannot claim a successful save");
 }
 void concurrentReservationRechecksChangedFolderContents()
 {
@@ -379,7 +409,7 @@ void concurrentReservationRechecksChangedFolderContents()
     require(first.configure(config(folder)).wasOk() && second.configure(config(folder)).wasOk(), "two previews");
     require(folder.file.getChildFile("take_01.flac").replaceWithText("original"), "folder changes after preview");
     std::barrier begin(3);
-    auto firstResult = juce::Result::fail("not started"), secondResult = firstResult;
+    qfr::RecorderResult firstResult { qfr::ErrorCode::startFailed }, secondResult = firstResult;
     std::thread a([&] { begin.arrive_and_wait(); firstResult = first.start(); });
     std::thread b([&] { begin.arrive_and_wait(); secondResult = second.start(); });
     begin.arrive_and_wait(); a.join(); b.join();
@@ -429,7 +459,19 @@ void startupDiskExceptionsReportFailureAndRetainReservation()
     auto started = session.start();
     auto outcome = session.snapshot();
     require(started.failed() && outcome.state == qfr::RecordingSession::State::failed && outcome.incomplete
-            && outcome.recordingFile.existsAsFile() && !outcome.controlsLocked(), "startup exception reports failure and retains incomplete reservation");
+            && outcome.recordingFile.existsAsFile() && !outcome.controlsLocked()
+            && outcome.error.code == qfr::ErrorCode::startFailed && outcome.error.detail == "disk unavailable", "startup exception reports failure and retains incomplete reservation");
+}
+void counterExhaustionRequiresAnExplicitNewPrefix()
+{
+    Folder folder;
+    qfr::RecordingSession session;
+    require(folder.file.getChildFile("take_18446744073709551615.partial.flac").replaceWithText("occupied"), "seed exhausted counter");
+    const auto exhausted = session.configure(config(folder));
+    require(exhausted.code == qfr::ErrorCode::counterExhausted && session.start().failed(), "maximum counter cannot wrap or start a recording");
+    require(session.configure(config(folder, "another")).wasOk(), "explicit new prefix recovers recording");
+    require(folder.file.getChildFile("tooLarge_18446744073709551616.flac").replaceWithText("occupied"), "seed oversized counter");
+    require(session.configure(config(folder, "tooLarge")).code == qfr::ErrorCode::counterTooLarge, "oversized counter has a distinct stable result");
 }
 void stopRacesAnInputBlockAndDeviceLossWithoutPartialAcceptance()
 {
@@ -451,7 +493,8 @@ void stopRacesAnInputBlockAndDeviceLossWithoutPartialAcceptance()
         auto reader = decode(outcome.recordingFile);
         require(reader->lengthInSamples == 0 || reader->lengthInSamples == 131072, "stop accepts the whole in-flight input block or none of it");
         session.requestStop(); session.inputLost();
-        require(session.snapshot().state == outcome.state && session.snapshot().message == outcome.message, "late stop/device notification cannot overwrite a terminal outcome");
+        require(session.snapshot().state == outcome.state && session.snapshot().failureReason == outcome.failureReason
+            && session.snapshot().finalization == outcome.finalization && session.snapshot().recordingFile == outcome.recordingFile, "late stop/device notification cannot overwrite a terminal outcome");
     }
 }
 }
@@ -474,6 +517,7 @@ int main()
         failedInputPreservesFinalizableAudioAndReportsIncompleteFinalization();
         std::cout << "PASS input loss and incomplete finalization\n";
         driverDiscontinuityFailsTheTakeAndPreservesAcceptedAudio();
+        inputInterruptionAndFinalFlushFailureRemainSeparate();
         std::cout << "PASS driver discontinuity and preserved audio\n";
         finalizationLocksAnotherTakeAndPromotionDoesNotReplace();
         std::cout << "PASS finalization locks and promotion conflict\n";
@@ -484,6 +528,7 @@ int main()
         rejectsAnUnwritableExistingFolder();
         std::cout << "PASS unwritable target folder\n";
         startupDiskExceptionsReportFailureAndRetainReservation();
+        counterExhaustionRequiresAnExplicitNewPrefix();
         std::cout << "PASS startup disk exception\n";
         stopRacesAnInputBlockAndDeviceLossWithoutPartialAcceptance();
         std::cout << "PASS stop/input/device-loss race\n";

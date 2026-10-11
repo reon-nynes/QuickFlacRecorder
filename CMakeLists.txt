@@ -47,12 +47,26 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 target_compile_definitions(QuickFlacRecorderInput PUBLIC JUCE_JACK=${QFR_JACK_ENABLED})
 
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/localization/catalogs/en.json" QFR_EN_CATALOG)
+string(JSON QFR_MICROPHONE_USAGE GET "${QFR_EN_CATALOG}" microphone_usage)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/localization/languages.json" QFR_LANGUAGE_REGISTRY)
+string(JSON QFR_LANGUAGE_COUNT LENGTH "${QFR_LANGUAGE_REGISTRY}")
+math(EXPR QFR_LAST_LANGUAGE "${QFR_LANGUAGE_COUNT} - 1")
+set(QFR_LOCALIZATION_PLIST "<plist><dict><key>CFBundleDevelopmentRegion</key><string>en</string><key>CFBundleLocalizations</key><array>")
+foreach(index RANGE ${QFR_LAST_LANGUAGE})
+    string(JSON language GET "${QFR_LANGUAGE_REGISTRY}" ${index} tag)
+    string(APPEND QFR_LOCALIZATION_PLIST "<string>${language}</string>")
+endforeach()
+string(APPEND QFR_LOCALIZATION_PLIST "</array></dict></plist>")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${QFR_CATALOG_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/src/localization/languages.json")
+
 juce_add_gui_app(QuickFlacRecorder
     PRODUCT_NAME "QuickFlacRecorder"
     COMPANY_NAME "reon-nynes"
     BUNDLE_ID "com.reon-nynes.quickflacrecorder"
+    PLIST_TO_MERGE "${QFR_LOCALIZATION_PLIST}"
     MICROPHONE_PERMISSION_ENABLED TRUE
-    MICROPHONE_PERMISSION_TEXT "QuickFlacRecorder uses your selected microphone or audio interface to record FLAC files.")
+    MICROPHONE_PERMISSION_TEXT "${QFR_MICROPHONE_USAGE}")
 target_sources(QuickFlacRecorder PRIVATE src/Main.cpp src/RecorderComponent.cpp src/RecordingPresentation.cpp)
 target_link_libraries(QuickFlacRecorder PRIVATE QuickFlacRecorderInput QuickFlacRecorderTranslation juce::juce_gui_extra)
 if(APPLE)
@@ -73,8 +87,8 @@ if(APPLE)
 endif()
 
 juce_add_console_app(RecorderInputCheck PRODUCT_NAME "RecorderInputCheck")
-target_sources(RecorderInputCheck PRIVATE src/InputCheck.cpp)
-target_link_libraries(RecorderInputCheck PRIVATE QuickFlacRecorderInput juce::juce_gui_basics)
+target_sources(RecorderInputCheck PRIVATE src/InputCheck.cpp src/RecordingPresentation.cpp)
+target_link_libraries(RecorderInputCheck PRIVATE QuickFlacRecorderInput QuickFlacRecorderTranslation juce::juce_gui_basics)
 
 include(CTest)
 if(BUILD_TESTING)

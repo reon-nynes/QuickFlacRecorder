@@ -21,15 +21,56 @@ void recordsStructuredSuccessAndFormatsInPresentation()
         && qfr::recordingStatus(snapshot, chinese) == juce::String::fromUTF8("正在录音：original_prefix_01.partial.flac"), "active result code and original filename");
     session.requestStop(); session.waitForStop();
     snapshot = session.snapshot();
-    require(snapshot.resultCode == qfr::RecordingSession::ResultCode::saved && snapshot.message.isEmpty()
+    require(snapshot.resultCode == qfr::RecordingSession::ResultCode::saved && snapshot.error.wasOk()
         && qfr::recordingStatus(snapshot, chinese) == juce::String::fromUTF8("已保存：original_prefix_01.flac"), "structured saved outcome has no session-formatted success message");
     require(qfr::recordingAction(qfr::RecordingSession::State::recording) == qfr::RecordingAction::stop
         && qfr::recordingAction(qfr::RecordingSession::State::finalizing) == qfr::RecordingAction::finalizing
         && qfr::recordingAction(qfr::RecordingSession::State::succeeded) == qfr::RecordingAction::record, "action state is independent of captions");
 }
+void translatesValidationAndPreservesUserData()
+{
+    const qfr::i18n::Translation chinese({ "zh-Hans" });
+    const auto detail = juce::String::fromUTF8("驱动 {name} # <error>");
+    require(qfr::resultMessage({ qfr::ErrorCode::folderMissing }, chinese)
+        == juce::String::fromUTF8("目标文件夹不存在。请选择现有且可写的文件夹。"), "translated folder correction guidance");
+    require(qfr::resultMessage({ qfr::ErrorCode::deviceOpenFailed, detail, "ASIO", "{input}" }, chinese).contains(detail),
+        "native diagnostics are substituted verbatim, never parsed as template syntax");
+}
+void formatsCompoundFailuresCountsAndEnglishFallback()
+{
+    const qfr::i18n::Translation english({ "en" }), chinese({ "zh" });
+    auto catalogs = qfr::i18n::productionCatalogs();
+    catalogs[1].json = R"({"recording_failure":"{unknown}"})";
+    const qfr::i18n::Translation fallback({ "zh" }, catalogs);
+    qfr::RecordingSession::Snapshot snapshot;
+    snapshot.state = qfr::RecordingSession::State::failed;
+    snapshot.resultCode = qfr::RecordingSession::ResultCode::failed;
+    snapshot.failureReason = qfr::RecordingSession::FailureReason::inputLost;
+    snapshot.finalization = qfr::RecordingSession::FinalizationOutcome::diskFlushFailed;
+    snapshot.incomplete = true;
+    snapshot.recordingFile = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile(juce::String::fromUTF8("录音{path}#_01.partial.flac"));
+    snapshot.error.detail = juce::String::fromUTF8("原始{diagnostic}");
+    snapshot.inputDetail = juce::String::fromUTF8("输入{driver}");
+    const auto en = qfr::recordingStatus(snapshot, english), zh = qfr::recordingStatus(snapshot, chinese);
+    require(en.contains("Input device was lost") && en.contains("Disk flush also failed") && !en.contains("Saved")
+        && en.contains(snapshot.recordingFile.getFullPathName()) && en.contains(snapshot.error.detail) && en.contains(snapshot.inputDetail), "English reports both causes and retained path");
+    require(zh.contains(juce::String::fromUTF8("输入设备已断开")) && zh.contains(juce::String::fromUTF8("磁盘写入也失败"))
+        && zh.contains(snapshot.recordingFile.getFullPathName()) && zh.contains(snapshot.error.detail), "Chinese reports both causes and retained path");
+    require(qfr::recordingStatus(snapshot, fallback) == en, "invalid translated failure falls back as one complete English message");
+    require(qfr::incompleteRecordingWarning(0, "{folder}", english) == "No incomplete recordings in {folder}.", "zero incomplete recordings");
+    require(qfr::incompleteRecordingWarning(1, "{folder}", english) == "1 incomplete recording. Inspect .partial.flac files in {folder}.", "English singular count");
+    require(qfr::incompleteRecordingWarning(2, "{folder}", english) == "2 incomplete recordings. Inspect .partial.flac files in {folder}.", "English plural count");
+    require(qfr::incompleteRecordingWarning(0, "{folder}", chinese) == juce::String::fromUTF8("{folder} 中没有未完成的录音。"), "Chinese zero count");
+    require(qfr::incompleteRecordingWarning(1, "{folder}", chinese) == juce::String::fromUTF8("有 1 个未完成的录音。请检查 {folder} 中的 .partial.flac 文件。"), "Chinese single count");
+    require(qfr::incompleteRecordingWarning(2, "{folder}", chinese) == juce::String::fromUTF8("有 2 个未完成的录音。请检查 {folder} 中的 .partial.flac 文件。"), "Chinese multiple count");
+    snapshot.finalization = qfr::RecordingSession::FinalizationOutcome::finalized;
+    snapshot.incomplete = false;
+    require(qfr::recordingStatus(snapshot, english).contains("Captured audio was finalized")
+        && !qfr::recordingStatus(snapshot, english).contains("Saved"), "interrupted finalized audio never claims successful capture");
+}
 }
 int main()
 {
-    try { recordsStructuredSuccessAndFormatsInPresentation(); std::cout << "PASS structured recording success and caption-independent action\n"; return 0; }
+    try { recordsStructuredSuccessAndFormatsInPresentation(); translatesValidationAndPreservesUserData(); formatsCompoundFailuresCountsAndEnglishFallback(); std::cout << "PASS recording presentation\n"; return 0; }
     catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
 }

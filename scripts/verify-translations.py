@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import plistlib
 
 
 def main():
@@ -27,6 +28,16 @@ def main():
             parser.error(f"Missing or stale embedded resource: {resource.name}")
         lines.append(f"PASS {resource.name} SHA-256 of LF source: {hashlib.sha256(canonical).hexdigest()}")
     if args.mac_resources:
+        plist = args.mac_resources.parent / "Info.plist"
+        metadata = plistlib.loads(plist.read_bytes())
+        supported = {entry["tag"] for entry in languages}
+        if not supported.issubset(set(metadata.get("CFBundleLocalizations", []))):
+            parser.error("macOS bundle does not declare every supported localization")
+        if metadata.get("CFBundleDevelopmentRegion") != "en":
+            parser.error("macOS bundle development region must be English")
+        if metadata.get("NSMicrophoneUsageDescription") != json.loads(catalogs["en_json"].read_text(encoding="utf-8"))["microphone_usage"]:
+            parser.error("macOS bundle default microphone explanation differs from the English catalog")
+        lines.append("PASS Info.plist supported localizations, English development region and microphone explanation")
         for language in languages:
             catalog = json.loads(catalogs[language["resource"]].read_text(encoding="utf-8"))
             resource = args.mac_resources / f'{language["tag"]}.lproj/InfoPlist.strings'

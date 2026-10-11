@@ -22,11 +22,11 @@ public:
     juce::StringArray devices(const juce::String& driver) const;
     juce::String defaultDriver() const;
     juce::String defaultDevice(const juce::String& driver) const;
-    juce::Result open(const juce::String& driver, const juce::String& inputDevice);
+    RecorderResult open(const juce::String& driver, const juce::String& inputDevice);
     void close();
     void rescan();
     bool isAvailable() const;
-    juce::String pollError();
+    RecorderResult pollError();
 
     juce::String driver() const { return selectedDriver; }
     juce::String inputDevice() const { return selectedDevice; }
@@ -55,5 +55,7 @@ private:
     std::atomic<juce::AudioIODevice*> callbackDevice { nullptr };
     std::atomic<int> lastXRunCount { -1 };
     std::atomic<bool> intentionalStop { true }, deviceLost { false }, started { false };
+    juce::CriticalSection diagnosticLock;
+    juce::String nativeDetail;
 };
 }

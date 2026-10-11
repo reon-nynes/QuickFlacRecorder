@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "InputController.h"
+#include "RecordingPresentation.h"
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <cmath>
 #include <iostream>
@@ -106,7 +107,7 @@ int main(int argc, char* argv[])
         return 2;
     }
     const auto opened = input.open(driver, device);
-    if (opened.failed()) { print("ERROR: " + opened.getErrorMessage()); return 2; }
+    if (opened.failed()) { print("ERROR: " + qfr::resultMessage(opened, qfr::i18n::Translation({ "en" }))); return 2; }
     const auto channels = input.channels();
     if (left >= channels.size() || right >= channels.size())
     {
@@ -120,20 +121,20 @@ int main(int argc, char* argv[])
     config.leftInputChannel = left;
     config.rightInputChannel = right;
     const auto configured = session.configure(config);
-    if (configured.failed()) { print("ERROR: " + configured.getErrorMessage()); return 2; }
+    if (configured.failed()) { print("ERROR: " + qfr::resultMessage(configured, qfr::i18n::Translation({ "en" }))); return 2; }
     print("driver=" + driver + " input=" + device + " left_channel=" + juce::String(left + 1)
           + " (" + channels[left] + ")" + (right >= 0 ? " right_channel=" + juce::String(right + 1) + " (" + channels[right] + ")" : ""));
     print("input_rate_before_open=" + juce::String(input.sampleRateBeforeOpen(), 0)
           + " opened_input_stream_rate=" + juce::String(input.sampleRate(), 0)
           + " bits=16 duration_requested=" + juce::String(seconds));
     const auto started = session.start();
-    if (started.failed()) { print("ERROR: " + started.getErrorMessage()); return 2; }
+    if (started.failed()) { print("ERROR: " + qfr::recordingStatus(session.snapshot(), qfr::i18n::Translation({ "en" }))); return 2; }
     print("RECORDING: speak into the selected microphone now.");
     const auto began = juce::Time::getMillisecondCounterHiRes();
     while (juce::Time::getMillisecondCounterHiRes() - began < seconds * 1000
         && session.snapshot().state == qfr::RecordingSession::State::recording)
     {
-        if (input.pollError().isNotEmpty()) break;
+        if (input.pollError().failed()) break;
         juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
     }
     session.requestStop();
@@ -142,7 +143,7 @@ int main(int argc, char* argv[])
     const auto result = session.snapshot();
     if (result.state != qfr::RecordingSession::State::succeeded)
     {
-        print("ERROR: " + result.message + " file=" + result.recordingFile.getFullPathName());
+        print("ERROR: " + qfr::recordingStatus(result, qfr::i18n::Translation({ "en" })) + " file=" + result.recordingFile.getFullPathName());
         return 2;
     }
     return inspect(result.recordingFile, config.inputStreamRate, right >= 0 ? 2 : 1);

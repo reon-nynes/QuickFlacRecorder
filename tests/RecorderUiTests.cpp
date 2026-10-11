@@ -43,6 +43,10 @@ void controlsPreserveNativeIdentities(const juce::File& root, const juce::File& 
         require(driver.getText() == translation.text(MessageId::Unavailable, { { "name", nativeDriver } })
             && device.getText() == translation.text(MessageId::Unavailable, { { "name", nativeDevice } }), "native identities receive translated presentation annotations");
         auto& action = actionButton(recorder);
+        auto& status = childWithTitle<juce::Label>(recorder, translation.text(MessageId::StatusTitle));
+        require(status.getText() == qfr::resultMessage({ qfr::ErrorCode::driverUnavailable, {}, nativeDriver, nativeDevice }, translation),
+            "missing remembered driver has translated guidance with unchanged native identities");
+        require(status.getTooltip() == status.getText() && status.getDescription() == status.getText(), "full error remains available in tooltip and accessible description");
         require(action.getAction() == qfr::RecordingAction::record && action.getButtonText() == translation.text(MessageId::Record)
             && ! action.isEnabled(), "missing input disables the caption-independent Record action");
         for (float scale : { 1.0f, 1.5f, 2.0f })
@@ -54,6 +58,126 @@ void controlsPreserveNativeIdentities(const juce::File& root, const juce::File& 
     }
     require(settings.getValue("audioDriver") == nativeDriver && settings.getValue("inputDevice") == nativeDevice,
         "saving preferences preserves exact native identities including annotation-like text");
+}
+void inputResultsDoNotDependOnLanguage()
+{
+    qfr::RecordingSession session;
+    qfr::InputController input(session);
+    const auto nativeDriver = juce::String::fromUTF8("不存在{driver}"), nativeDevice = juce::String::fromUTF8("设备{input}");
+    const auto result = input.open(nativeDriver, nativeDevice);
+    require(result.code == qfr::ErrorCode::driverUnavailable && result.driver == nativeDriver && result.device == nativeDevice
+        && input.driver() == nativeDriver && input.inputDevice() == nativeDevice && !input.isAvailable(),
+        "unavailable driver retains original identities in structured result");
+    if (input.defaultDriver().isNotEmpty())
+    {
+        const auto missing = input.open(input.defaultDriver(), nativeDevice);
+        require(missing.code == qfr::ErrorCode::deviceUnavailable && missing.device == nativeDevice,
+            "missing remembered input retains identity instead of selecting a fallback");
+    }
+}
+void nativeFailureAndRecoveryEvidence(const juce::File& root, const juce::File& evidence, const qfr::i18n::Translation& translation)
+{
+    using qfr::i18n::MessageId;
+    const auto tag = translation.language().tag;
+    const auto recordingFolder = root.getChildFile(tag + "-recovery-audio");
+    require(recordingFolder.createDirectory().wasOk(), "isolate recovery recording fixtures by language");
+    juce::PropertiesFile::Options options;
+    options.applicationName = "qfr-recovery-test"; options.filenameSuffix = ".settings";
+    juce::PropertiesFile settings(root.getChildFile(tag + "-recovery.settings"), options);
+    settings.setValue("targetFolder", recordingFolder.getFullPathName());
+    qfr::RecorderComponent recorder(settings, translation);
+    recorder.addToDesktop(juce::ComponentPeer::windowIsTemporary); recorder.setVisible(true);
+    auto& action = actionButton(recorder);
+    auto& status = childWithTitle<juce::Label>(recorder, translation.text(MessageId::StatusTitle));
+    auto& folder = childWithTitle<juce::TextEditor>(recorder, translation.text(MessageId::TargetFolder));
+    auto& prefix = childWithTitle<juce::TextEditor>(recorder, translation.text(MessageId::Prefix));
+    const auto advance = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil(100); };
+    const auto capture = [&](const juce::String& state)
+    {
+        for (float scale : { 1.0f, 1.5f, 2.0f }) writeImage(recorder, evidence, tag + "-" + state + "-" + juce::String(scale, 1), scale);
+        require(status.getTooltip() == status.getText() && status.getDescription() == status.getText(), "full recovery status remains accessible");
+        juce::TooltipWindow tooltip;
+        tooltip.setLookAndFeel(&recorder.getLookAndFeel());
+        tooltip.displayTip(recorder.getScreenPosition(), status.getTooltip());
+        writeImage(tooltip, evidence, tag + "-" + state + "-tooltip-1.5", 1.5f);
+        tooltip.hideTip(); tooltip.setLookAndFeel(nullptr);
+    };
+    advance(); require(action.isEnabled(), "native input ready for recovery tests");
+    const auto missing = recordingFolder.getChildFile(juce::String::fromUTF8("不存在{folder}"));
+    folder.setText(missing.getFullPathName()); advance();
+    require(!action.isEnabled() && folder.getText() == missing.getFullPathName() && !missing.exists()
+        && status.getText() == qfr::resultMessage({ qfr::ErrorCode::folderMissing }, translation), "missing target folder preserves value and blocks recording");
+    capture("folder-missing");
+    folder.setText(recordingFolder.getFullPathName()); advance(); require(action.isEnabled(), "explicit target-folder correction restores recording");
+    prefix.setText("CON"); advance();
+    require(!action.isEnabled() && prefix.getText() == "CON" && status.getText() == qfr::resultMessage({ qfr::ErrorCode::prefixReserved }, translation), "invalid prefix preserves value and blocks recording");
+    capture("prefix-invalid");
+    prefix.setText(juce::String::fromUTF8("录音{filename}")); advance(); require(action.isEnabled(), "prefix correction recovers unchanged selected language");
+    const auto partial = recordingFolder.getChildFile("test_01.partial.flac");
+    require(partial.replaceWithText("incomplete"), "seed incomplete warning");
+    folder.setText(recordingFolder.getFullPathName() + juce::File::getSeparatorString()); advance();
+    require(status.getText() == qfr::incompleteRecordingWarning(1, folder.getText(), translation), "one incomplete recording uses localized grammar and actual folder");
+    capture("incomplete-one");
+    require(partial.deleteFile(), "remove isolated warning fixture");
+    recorder.removeFromDesktop();
+    // A real Windows input and the production writer use a controlled disk boundary.
+    qfr::RecordingSession::Options diskOptions;
+    diskOptions.diskFlushInterval = std::chrono::milliseconds(20);
+    class RefusedFlush final : public juce::OutputStream
+    {
+    public:
+        explicit RefusedFlush(std::unique_ptr<juce::OutputStream> stream) : output(std::move(stream)) {}
+        void flush() override { throw std::runtime_error("native test {flush} refused"); }
+        bool setPosition(juce::int64 position) override { return output->setPosition(position); }
+        juce::int64 getPosition() override { return output->getPosition(); }
+        bool write(const void* data, size_t size) override { return output->write(data, size); }
+    private:
+        std::unique_ptr<juce::OutputStream> output;
+    };
+    diskOptions.outputAdapter = [](std::unique_ptr<juce::OutputStream> stream) { return std::make_unique<RefusedFlush>(std::move(stream)); };
+    qfr::RecorderComponent failed(settings, translation, std::move(diskOptions));
+    failed.addToDesktop(juce::ComponentPeer::windowIsTemporary); failed.setVisible(true); advance();
+    auto& failedAction = actionButton(failed);
+    require(failedAction.isEnabled(), "real input ready for disk failure");
+    failedAction.triggerClick(); advance(); advance();
+    auto& failedStatus = childWithTitle<juce::Label>(failed, translation.text(MessageId::StatusTitle));
+    require(failedAction.getAction() == qfr::RecordingAction::record && failedStatus.getText().contains(".partial.flac")
+        && failedStatus.getText().contains("native test {flush} refused"), "native writer failure exposes retained recording and raw diagnostic");
+    for (float scale : { 1.0f, 1.5f, 2.0f }) writeImage(failed, evidence, tag + "-flush-failure-" + juce::String(scale, 1), scale);
+    juce::TooltipWindow tooltip;
+    tooltip.setLookAndFeel(&failed.getLookAndFeel());
+    tooltip.displayTip(failed.getScreenPosition(), failedStatus.getTooltip());
+    writeImage(tooltip, evidence, tag + "-flush-failure-tooltip-1.5", 1.5f);
+    tooltip.hideTip(); tooltip.setLookAndFeel(nullptr);
+    failed.removeFromDesktop();
+}
+void nativeMissingInputRecovery(const juce::File& root, const juce::File& evidence, const qfr::i18n::Translation& translation)
+{
+    using qfr::i18n::MessageId;
+    juce::PropertiesFile::Options options;
+    options.applicationName = "qfr-input-recovery"; options.filenameSuffix = ".settings";
+    juce::PropertiesFile settings(root.getChildFile(translation.language().tag + "-input-recovery.settings"), options);
+    settings.setValue("targetFolder", root.getFullPathName());
+    const auto missing = juce::String::fromUTF8("已断开的设备 {input}");
+    settings.setValue("inputDevice", missing);
+    qfr::RecorderComponent recorder(settings, translation);
+    recorder.addToDesktop(juce::ComponentPeer::windowIsTemporary); recorder.setVisible(true);
+    juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+    auto& input = childWithTitle<juce::ComboBox>(recorder, translation.text(MessageId::InputDevice));
+    auto& action = actionButton(recorder);
+    auto& status = childWithTitle<juce::Label>(recorder, translation.text(MessageId::StatusTitle));
+    require(!action.isEnabled() && status.getText().contains(missing) && settings.getValue("inputDevice") == missing,
+        "missing remembered input remains selected with translated guidance");
+    for (float scale : { 1.0f, 1.5f, 2.0f }) writeImage(recorder, evidence, translation.language().tag + "-input-missing-" + juce::String(scale, 1), scale);
+    require(input.getNumItems() > 0, "an available replacement input exists for native recovery");
+    input.setSelectedId(input.getItemId(0), juce::sendNotificationSync);
+    juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+    require(action.isEnabled() && settings.getValue("inputDevice") != missing, "explicitly selecting available input recovers recording and saves its native identity");
+    action.triggerClick(); juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+    require(action.getAction() == qfr::RecordingAction::stop, "replacement input records again");
+    action.triggerClick(); juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+    require(action.getAction() == qfr::RecordingAction::record, "replacement recording finishes normally");
+    recorder.removeFromDesktop();
 }
 void iconsDoNotUseCaptions(const juce::File& evidence)
 {
@@ -182,11 +306,16 @@ int main(int argc, char** argv)
             R"({"record":"Capture", "stop":"End take", "ready":"Ready to capture the selected input. Check the live input levels and the original recording filename before you begin.","format":"{channels, plural, one {# recorded channel} other {# recorded channels}} at the original stream rate {rate}","unavailable":"Unavailable input: {name}"})" });
         controlsPreserveNativeIdentities(root, evidence, qfr::i18n::Translation({ "en-XA" }, catalogs));
         iconsDoNotUseCaptions(evidence);
+        inputResultsDoNotDependOnLanguage();
         std::cout << "PASS bilingual controls, native identities, and caption-independent icons\n";
         if (args.contains("--native-recording"))
         {
             nativeRecordingEvidence(root, evidence, qfr::i18n::Translation({ "en" }));
             nativeRecordingEvidence(root, evidence, qfr::i18n::Translation({ "zh-Hans" }));
+            nativeFailureAndRecoveryEvidence(root, evidence, qfr::i18n::Translation({ "en" }));
+            nativeFailureAndRecoveryEvidence(root, evidence, qfr::i18n::Translation({ "zh-Hans" }));
+            nativeMissingInputRecovery(root, evidence, qfr::i18n::Translation({ "en" }));
+            nativeMissingInputRecovery(root, evidence, qfr::i18n::Translation({ "zh-Hans" }));
             nativeRecordingEvidence(root, evidence, qfr::i18n::Translation({ "en-XA" }, catalogs));
             std::cout << "PASS Windows default-input recording, translated close confirmation, and saved status\n";
         }

@@ -102,8 +102,8 @@ void LevelMeter::paint(juce::Graphics& g)
     g.drawText("0 dBFS", barX + barWidth - 50, 48, 50, 16, juce::Justification::right);
 }
 
-RecorderComponent::RecorderComponent(juce::PropertiesFile& settings, i18n::Translation selected)
-    : preferences(settings), translation(std::move(selected))
+RecorderComponent::RecorderComponent(juce::PropertiesFile& settings, i18n::Translation selected, RecordingSession::Options options)
+    : preferences(settings), translation(std::move(selected)), session(std::move(options))
 {
     setLookAndFeel(&lookAndFeel);
     setWantsKeyboardFocus(true);
@@ -219,7 +219,7 @@ void RecorderComponent::requestMicrophonePermission()
         if (granted) safeThis->openInput();
         else
         {
-            safeThis->inputError = "Microphone permission denied. Allow microphone access in system privacy settings and reopen the app.";
+            safeThis->inputError = { ErrorCode::permissionDenied };
             safeThis->configureSession();
         }
     });
@@ -272,7 +272,7 @@ void RecorderComponent::openInput()
     if (session.snapshot().controlsLocked()) return;
     if (! microphoneAllowed) { configureSession(); return; }
     const auto result = input.open(selectedDriver, selectedDevice);
-    inputError = result.getErrorMessage();
+    inputError = result;
     populateChannels();
     configureSession();
     savePreferences();
@@ -287,11 +287,12 @@ void RecorderComponent::configureSession()
     config.inputStreamRate = input.sampleRate();
     config.leftInputChannel = leftChannel.getSelectedId() - 1;
     config.rightInputChannel = mode.getSelectedId() == 2 ? rightChannel.getSelectedId() - 1 : -1;
-    if (mode.getSelectedId() == 2 && rightChannel.getSelectedId() <= 0)
-        configurationError = "Choose two available input channels for stereo.";
-    else if (leftChannel.getSelectedId() <= 0)
-        configurationError = "Choose an available mono input or stereo left input channel.";
-    else configurationError = session.configure(config).getErrorMessage();
+    configurationError = session.configure(config);
+    if (configurationError.wasOk() && mode.getSelectedId() == 2 && rightChannel.getSelectedId() <= 0)
+        configurationError = { ErrorCode::stereoChannelsMissing };
+    else if (configurationError.wasOk() && leftChannel.getSelectedId() <= 0)
+        configurationError = { ErrorCode::monoChannelMissing };
+
     incompleteRecordings = config.targetFolder.isDirectory()
         ? config.targetFolder.findChildFiles(juce::File::findFiles, false, "*.partial.flac").size() : 0;
     updateStatus();
@@ -308,20 +309,20 @@ void RecorderComponent::toggleRecording()
     }
     if (state == RecordingSession::State::finalizing) return;
     configureSession();
-    if (inputError.isNotEmpty() || configurationError.isNotEmpty() || ! input.isAvailable()) return;
-    configurationError = session.start().getErrorMessage();
+    if (inputError.failed() || configurationError.failed() || ! input.isAvailable()) return;
+    session.start();
     updateStatus();
 }
 
 void RecorderComponent::timerCallback()
 {
     const auto error = input.pollError();
-    if (error.isNotEmpty()) inputError = error;
+    if (error.failed()) inputError = error;
     meter.update(session.readLevels());
     const auto snapshot = session.snapshot();
     const auto now = juce::Time::getMillisecondCounterHiRes();
     if (snapshot.state == RecordingSession::State::idle && now - lastPreviewRefresh > 1000
-        && configurationError.isEmpty())
+        && configurationError.wasOk())
     {
         session.refreshPreview();
         lastPreviewRefresh = now;
@@ -350,7 +351,7 @@ void RecorderComponent::updateStatus()
         : snapshot.state == RecordingSession::State::finalizing ? theme::surface
         : theme::record.interpolatedWith(theme::surface, 0.85f));
     recordButton.setEnabled(snapshot.state == RecordingSession::State::recording
-        || (! locked && input.isAvailable() && inputError.isEmpty() && configurationError.isEmpty()));
+        || (! locked && input.isAvailable() && inputError.wasOk() && configurationError.wasOk()));
     leftLabel.setText(translation.text(mode.getSelectedId() == 2 ? MessageId::LeftInput : MessageId::MonoInput), juce::dontSendNotification);
     leftChannel.setTitle(leftLabel.getText());
     const auto seconds = static_cast<int>(snapshot.elapsedSeconds);
@@ -375,21 +376,22 @@ void RecorderComponent::updateStatus()
     {
         colour = theme::danger;
     }
-    else if (! locked && inputError.isNotEmpty()) { message = inputError; colour = theme::danger; }
-    else if (! locked && configurationError.isNotEmpty()) { message = configurationError; colour = theme::danger; }
+    else if (! locked && inputError.failed()) { message = resultMessage(inputError, translation); colour = theme::danger; }
+    else if (! locked && configurationError.failed()) { message = resultMessage(configurationError, translation); colour = theme::danger; }
     else if (snapshot.state == RecordingSession::State::succeeded)
     {
         colour = theme::meter;
     }
     else if (! locked && incompleteRecordings > 0)
     {
-        message = juce::String(incompleteRecordings) + " incomplete recording(s). Inspect .partial.flac files in the target folder.";
+        message = incompleteRecordingWarning(incompleteRecordings, targetFolder.getText(), translation);
         colour = theme::warning;
     }
     else if (! locked && message.isEmpty()) message = translation.text(MessageId::Ready);
     status.setColour(juce::Label::textColourId, colour);
     status.setText(message, juce::dontSendNotification);
     status.setTooltip(message);
+    status.setDescription(message);
 }
 
 bool RecorderComponent::keyPressed(const juce::KeyPress& key, juce::Component*)

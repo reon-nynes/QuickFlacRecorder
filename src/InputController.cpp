@@ -91,27 +91,28 @@ void InputController::close()
     channelNames.clear();
 }
 
-juce::Result InputController::open(const juce::String& driverName, const juce::String& deviceName)
+RecorderResult InputController::open(const juce::String& driverName, const juce::String& deviceName)
 {
     close();
     deviceLost.store(false);
+    { const juce::ScopedLock lock(diagnosticLock); nativeDetail.clear(); }
     selectedDriver = driverName;
     selectedDevice = deviceName;
     auto* type = findType(driverName);
     if (type == nullptr)
-        return juce::Result::fail("Audio driver unavailable. Choose an available audio driver.");
+        return { ErrorCode::driverUnavailable, {}, driverName, deviceName };
     if (deviceName.isEmpty() || ! type->getDeviceNames(true).contains(deviceName))
-        return juce::Result::fail("Input device unavailable. Choose an available input device.");
+        return { ErrorCode::deviceUnavailable, {}, driverName, deviceName };
 
     device.reset(type->createDevice(type->hasSeparateInputsAndOutputs() ? juce::String() : deviceName,
                                    deviceName));
     if (! device)
-        return juce::Result::fail("Cannot create this input. Choose another input device or audio driver.");
+        return { ErrorCode::deviceCreateFailed, {}, driverName, deviceName };
     channelNames = device->getInputChannelNames();
     if (channelNames.isEmpty())
     {
         close();
-        return juce::Result::fail("This device has no input channels. Choose an input device.");
+        return { ErrorCode::noInputChannels, {}, driverName, deviceName };
     }
 
     juce::BigInteger inputs;
@@ -124,16 +125,7 @@ juce::Result InputController::open(const juce::String& driverName, const juce::S
     if (error.isNotEmpty())
     {
         close();
-       #if JUCE_WINDOWS
-        return juce::Result::fail("Cannot open input: " + error
-            + ". Check Windows Settings > Privacy & security > Microphone, then reselect the input.");
-       #elif JUCE_MAC
-        return juce::Result::fail("Cannot open input: " + error
-            + ". Allow microphone access in System Settings > Privacy & Security > Microphone.");
-       #else
-        return juce::Result::fail("Cannot open input: " + error
-            + ". Check device access permissions and whether another app is using this input.");
-       #endif
+        return { ErrorCode::deviceOpenFailed, error, driverName, deviceName };
     }
     streamRate.store(device->getCurrentSampleRate());
     intentionalStop.store(false);
@@ -141,9 +133,10 @@ juce::Result InputController::open(const juce::String& driverName, const juce::S
     if (! device->isPlaying())
     {
         close();
-        return juce::Result::fail("Input did not start. Check device access and reselect the input.");
+        const juce::ScopedLock lock(diagnosticLock);
+        return { ErrorCode::deviceStartFailed, nativeDetail, driverName, deviceName };
     }
-    return juce::Result::ok();
+    return {};
 }
 
 bool InputController::isAvailable() const
@@ -151,15 +144,18 @@ bool InputController::isAvailable() const
     return device && ! deviceLost.load() && device->isOpen() && device->isPlaying();
 }
 
-juce::String InputController::pollError()
+RecorderResult InputController::pollError()
 {
-    if (deviceLost.load())
-        return "Input stopped or disconnected. Check the connection and reselect the input device.";
     if (device && (! device->isOpen() || ! device->isPlaying()))
     {
         deviceLost.store(true);
         session.inputLost();
-        return "Input is unavailable. Check the connection and reselect the input device.";
+    }
+    if (deviceLost.load())
+    {
+        const juce::ScopedLock lock(diagnosticLock);
+        session.retainInputDiagnostic(nativeDetail);
+        return { ErrorCode::deviceLost, nativeDetail, selectedDriver, selectedDevice };
     }
     return {};
 }
@@ -217,8 +213,9 @@ void InputController::audioDeviceStopped()
     }
 }
 
-void InputController::audioDeviceError(const juce::String&)
+void InputController::audioDeviceError(const juce::String& detail)
 {
+    { const juce::ScopedLock lock(diagnosticLock); nativeDetail = detail; }
     deviceLost.store(true);
     session.inputLost();
 }

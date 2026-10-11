@@ -2,6 +2,8 @@
 
 Record results for the exact source commit and binary SHA-256. An unchecked item is pending. A passing build or session test is evidence only for the behavior it exercised. It cannot establish microphone capture, permissions, or native controls on a different operating system.
 
+The [issue #11 recovery validation report](validation/recovery.md) records bilingual validation/failure/recovery evidence and explicit pending platform checks.
+
 The owner reviews the working Windows build and draft pull request before a public release. The CI rows link to the current PR's live check results. A successful job and its downloadable artifact supply evidence for that job; the job's logs retain failures as well.
 
 ## Build evidence

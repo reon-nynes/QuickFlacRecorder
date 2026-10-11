@@ -26,7 +26,7 @@ class RecorderComponent final : public juce::Component,
                                 private juce::KeyListener
 {
 public:
-    RecorderComponent(juce::PropertiesFile&, i18n::Translation);
+    RecorderComponent(juce::PropertiesFile&, i18n::Translation, RecordingSession::Options = {});
     ~RecorderComponent() override;
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -62,7 +62,7 @@ private:
     LevelMeter meter { translation };
     std::unique_ptr<juce::FileChooser> folderChooser;
     std::function<void()> quitAfterStop;
-    juce::String inputError, configurationError;
+    RecorderResult inputError, configurationError;
     juce::String selectedDriver, selectedDevice;
     juce::StringArray driverNames, deviceNames;
     bool microphoneAllowed = false, closeDialogOpen = false;

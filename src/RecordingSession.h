@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <chrono>
+#include "RecorderResult.h"
 
 namespace qfr
 {
@@ -14,6 +15,8 @@ class RecordingSession final
 public:
     enum class State { idle, recording, finalizing, succeeded, failed };
     enum class ResultCode { none, ready, recording, finalizing, saved, failed };
+    enum class FailureReason { none, inputLost, discontinuity, overflow, writer, diskFlush, promotion, start };
+    enum class FinalizationOutcome { none, finalized, writerFailed, diskFlushFailed, promotionFailed };
 
     struct Configuration
     {
@@ -37,7 +40,10 @@ public:
     {
         State state = State::idle;
         ResultCode resultCode = ResultCode::none;
-        juce::String message; // English failure diagnostics until the recovery-message migration.
+        RecorderResult error;
+        juce::String inputDetail; // Verbatim native diagnostic retained independently of disk diagnostics.
+        FailureReason failureReason = FailureReason::none;
+        FinalizationOutcome finalization = FinalizationOutcome::none;
         juce::File nextFile;
         juce::File recordingFile;
         bool incomplete = false;
@@ -61,13 +67,14 @@ public:
     RecordingSession& operator=(const RecordingSession&) = delete;
 
     // Call these methods from one control thread. Configuration updates recompute the filename preview.
-    juce::Result configure(const Configuration&);
-    juce::Result refreshPreview();
-    juce::Result start();
+    RecorderResult configure(const Configuration&);
+    RecorderResult refreshPreview();
+    RecorderResult start();
     void requestStop(); // Returns immediately; poll snapshot() until finalization ends.
     void waitForStop(); // Blocking, for tests and shutdown after capture has been stopped.
     Snapshot snapshot() const;
     Levels readLevels() noexcept;
+    void retainInputDiagnostic(const juce::String&); // Control thread, after polling the native input boundary.
 
     // Exactly one audio producer. No allocation, filesystem I/O, encoding, or blocking locks.
     // Call while idle as well, for selected-channel metering.
