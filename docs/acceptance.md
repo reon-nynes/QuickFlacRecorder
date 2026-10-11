@@ -8,7 +8,7 @@ The delivery implementation adds the workflow and package inspections listed her
 
 | Check | Required evidence | Current status |
 | --- | --- | --- |
-| Local Windows Release build and session tests | Commit, compiler/CMake versions, build output, `ctest` output | Pending |
+| Local Windows Release build and session tests | Commit, compiler/CMake versions, build output, `ctest` output | Passed, [Windows report](validation/windows.md) |
 | Windows portable executable | `windows-dependencies.txt`, x64 result, binary hash, normal launch | Pending |
 | Windows CI | Successful run for the implementation commit and downloadable preview | Pending |
 | macOS universal CI | Successful run, both architecture/minimum-version results, microphone description, signature verification, preview | Pending |
@@ -31,7 +31,7 @@ The owner selected the UltraLite-mk5 input device, mono input channel 1, for the
 - [ ] Record a second take with the same prefix and verify its counter advanced and the first file remains unchanged.
 - [ ] Record the commit, executable hash, Windows version, input device, audio driver, channel, input stream rate, tool output, and observed result below.
 
-Windows recording evidence: pending.
+Windows recording evidence: [actual UltraLite channel 1 capture and independent FLAC inspection](validation/windows.md). Listening to confirm the physical microphone remains pending.
 
 ## Native UI checks
 
@@ -52,7 +52,7 @@ Run these on the local Windows build. Repeat on macOS and Linux before claiming 
 - [ ] Disconnecting the selected input during a take stops capture, reports a failure, and preserves audio that can be finalized. An unsuccessful finalization retains its incomplete name and is not described as a successful save.
 - [ ] Incomplete files left after an interrupted process remain available and have visible incomplete status. The app does not claim automatic recovery.
 
-Native UI evidence: pending.
+Native UI evidence: [complete window screenshots and observed Windows behavior](validation/windows.md). Unchecked items still require their full native procedure; the report distinguishes partial observations from pending checks.
 
 ## Outstanding macOS hardware checks
 
