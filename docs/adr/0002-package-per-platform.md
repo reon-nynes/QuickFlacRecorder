@@ -1,0 +1,3 @@
+# Package a portable download for each desktop platform
+
+The user accepted one portable download per operating system: a Windows x64 .exe, a macOS 12+ universal Intel/Apple Silicon .app, and a Linux x64 AppImage with Ubuntu 22.04+ as the initial tested baseline. A macOS bundle meets the intended one-application experience even though it contains multiple files, and AppImage packages Linux dependencies more usefully than a bare executable whose portability would depend on each distribution. Windows will be tested locally first; wider Linux compatibility and additional architectures require later validation.
