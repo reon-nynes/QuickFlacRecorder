@@ -321,10 +321,11 @@ void RecorderComponent::timerCallback()
     meter.update(session.readLevels());
     const auto snapshot = session.snapshot();
     const auto now = juce::Time::getMillisecondCounterHiRes();
-    if (snapshot.state == RecordingSession::State::idle && now - lastPreviewRefresh > 1000
-        && configurationError.wasOk())
+    if (snapshot.state == RecordingSession::State::idle && now - lastPreviewRefresh > 1000)
     {
-        session.refreshPreview();
+        // Recheck recoverable idle validation and channel selection together.
+        // Terminal recording outcomes remain untouched until an explicit action.
+        configureSession();
         lastPreviewRefresh = now;
     }
     updateStatus();

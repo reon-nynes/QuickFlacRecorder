@@ -68,6 +68,10 @@ void inputResultsDoNotDependOnLanguage()
     require(result.code == qfr::ErrorCode::driverUnavailable && result.driver == nativeDriver && result.device == nativeDevice
         && input.driver() == nativeDriver && input.inputDevice() == nativeDevice && !input.isAvailable(),
         "unavailable driver retains original identities in structured result");
+    const auto firstDetail = juce::String::fromUTF8("第一个驱动错误 {detail}");
+    input.audioDeviceError(firstDetail);
+    input.audioDeviceError("later notification before UI poll");
+    require(input.pollError().detail == firstDetail, "native input boundary retains first diagnostic before polling");
     if (input.defaultDriver().isNotEmpty())
     {
         const auto missing = input.open(input.defaultDriver(), nativeDevice);
@@ -103,6 +107,13 @@ void nativeFailureAndRecoveryEvidence(const juce::File& root, const juce::File& 
         tooltip.hideTip(); tooltip.setLookAndFeel(nullptr);
     };
     advance(); require(action.isEnabled(), "native input ready for recovery tests");
+    require(recordingFolder.deleteFile(), "remove empty currently selected folder");
+    juce::MessageManager::getInstance()->runDispatchLoopUntil(1200);
+    const bool blockedMissing = !action.isEnabled() && status.getText() == qfr::resultMessage({ qfr::ErrorCode::folderMissing }, translation);
+    require(recordingFolder.createDirectory().wasOk(), "externally restore selected folder");
+    juce::MessageManager::getInstance()->runDispatchLoopUntil(1200);
+    require(blockedMissing && action.isEnabled() && folder.getText() == recordingFolder.getFullPathName(),
+        "passive folder validation disables Record and recovers when the original folder returns");
     const auto missing = recordingFolder.getChildFile(juce::String::fromUTF8("不存在{folder}"));
     folder.setText(missing.getFullPathName()); advance();
     require(!action.isEnabled() && folder.getText() == missing.getFullPathName() && !missing.exists()

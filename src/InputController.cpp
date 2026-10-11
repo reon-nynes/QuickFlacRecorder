@@ -215,7 +215,7 @@ void InputController::audioDeviceStopped()
 
 void InputController::audioDeviceError(const juce::String& detail)
 {
-    { const juce::ScopedLock lock(diagnosticLock); nativeDetail = detail; }
+    { const juce::ScopedLock lock(diagnosticLock); if (nativeDetail.isEmpty()) nativeDetail = detail; }
     deviceLost.store(true);
     session.inputLost();
 }

@@ -27,6 +27,7 @@ public:
     void rescan();
     bool isAvailable() const;
     RecorderResult pollError();
+    void audioDeviceError(const juce::String&) override; // Native driver diagnostic boundary; may run on its callback thread.
 
     juce::String driver() const { return selectedDriver; }
     juce::String inputDevice() const { return selectedDevice; }
@@ -41,7 +42,6 @@ private:
                                          int, const juce::AudioIODeviceCallbackContext&) override;
     void audioDeviceAboutToStart(juce::AudioIODevice*) override;
     void audioDeviceStopped() override;
-    void audioDeviceError(const juce::String&) override;
     void audioDeviceListChanged() override;
     void handleAsyncUpdate() override;
 
