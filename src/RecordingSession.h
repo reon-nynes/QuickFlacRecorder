@@ -5,6 +5,7 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <chrono>
 
 namespace qfr
 {
@@ -27,6 +28,8 @@ public:
         size_t captureCapacityFrames = 262144;
         // Optional disk boundary adapter, also usable to simulate output failures.
         std::function<std::unique_ptr<juce::OutputStream>(std::unique_ptr<juce::OutputStream>)> outputAdapter;
+        // Writer-thread durability policy; the application uses five seconds.
+        std::chrono::milliseconds diskFlushInterval { 5000 };
     };
 
     struct Snapshot

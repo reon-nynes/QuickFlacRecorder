@@ -151,6 +151,8 @@ void metersAndSavesSelectedStereoInOrder()
 struct DiskControl
 {
     std::atomic<bool> failWrites { false }, failMetadata { false }, corruptMetadata { false };
+    std::atomic<juce::int64> flushedBytes { 0 };
+    std::atomic<bool> failNextFlush { false };
     std::mutex mutex;
     std::condition_variable changed;
     bool blockFinalization = false, enteredFinalization = false, release = false;
@@ -160,7 +162,13 @@ class ControlledDisk final : public juce::OutputStream
 public:
     ControlledDisk(std::unique_ptr<juce::OutputStream> outputIn, std::shared_ptr<DiskControl> controlIn)
         : output(std::move(outputIn)), control(std::move(controlIn)) {}
-    void flush() override { output->flush(); }
+    void flush() override
+    {
+        if (control->failNextFlush.exchange(false)) throw std::runtime_error("disk flush refused");
+        output->flush();
+        control->flushedBytes = output->getPosition();
+        control->changed.notify_all();
+    }
     juce::int64 getPosition() override { return output->getPosition(); }
     bool setPosition(juce::int64 position) override
     {
@@ -193,6 +201,61 @@ private:
 qfr::RecordingSession::Options diskOptions(std::shared_ptr<DiskControl> control, size_t capacity = 262144)
 {
     return { capacity, [control](std::unique_ptr<juce::OutputStream> output) { return std::make_unique<ControlledDisk>(std::move(output), control); } };
+}
+void periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive()
+{
+    Folder folder;
+    auto disk = std::make_shared<DiskControl>();
+    auto options = diskOptions(disk);
+    options.diskFlushInterval = std::chrono::milliseconds(20);
+    qfr::RecordingSession session(options);
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start periodically flushed recording");
+    const auto partial = session.snapshot().recordingFile;
+    const auto initialBytes = partial.getSize();
+    std::array<float, 16384> source; source.fill(.25f);
+    const float* inputs[] { source.data() };
+    const auto waitForFlushedGrowth = [&](juce::int64 previousBytes)
+    {
+        std::unique_lock lock(disk->mutex);
+        return disk->changed.wait_for(lock, std::chrono::seconds(3), [&] { return disk->flushedBytes > previousBytes; });
+    };
+    session.processInput(inputs, 1, 16384);
+    const bool firstFlush = waitForFlushedGrowth(initialBytes);
+    const auto firstBytes = partial.getSize();
+    const bool stillRecording = session.snapshot().state == qfr::RecordingSession::State::recording;
+    session.processInput(inputs, 1, 16384);
+    const bool secondFlush = firstFlush && waitForFlushedGrowth(firstBytes);
+    const auto secondBytes = partial.getSize();
+    session.requestStop(); session.waitForStop();
+    require(firstFlush && stillRecording && firstBytes > initialBytes && secondFlush && secondBytes > firstBytes,
+            "periodic output flush exposes growing encoded partial audio while capture remains active");
+    const auto outcome = session.snapshot();
+    require(outcome.state == qfr::RecordingSession::State::succeeded && !partial.existsAsFile()
+            && decode(outcome.recordingFile)->lengthInSamples == 32768,
+            "periodic disk flushing preserves the continuous FLAC and normal stop finalization");
+}
+void periodicDiskFlushFailureStopsAndRetainsAnIncompleteRecording()
+{
+    Folder folder;
+    auto disk = std::make_shared<DiskControl>();
+    auto options = diskOptions(disk);
+    options.diskFlushInterval = std::chrono::milliseconds(20);
+    qfr::RecordingSession session(options);
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start flush-failure recording");
+    const auto partial = session.snapshot().recordingFile;
+    std::array<float, 16384> source; source.fill(.25f);
+    const float* inputs[] { source.data() };
+    session.processInput(inputs, 1, 16384);
+    disk->failNextFlush = true;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (session.snapshot().controlsLocked() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    session.requestStop(); session.waitForStop();
+    const auto outcome = session.snapshot();
+    require(outcome.state == qfr::RecordingSession::State::failed && outcome.incomplete
+            && outcome.message.contains("flush") && outcome.message.contains("incomplete")
+            && partial.existsAsFile() && !folder.file.getChildFile("take_01.flac").exists(),
+            "periodic disk flush failure reports the failed flush and retains an unpromoted incomplete recording");
 }
 void failedInputPreservesFinalizableAudioAndReportsIncompleteFinalization()
 {
@@ -404,6 +467,10 @@ int main()
         std::cout << "PASS selected mono FLAC and stop/drain/promotion\n";
         metersAndSavesSelectedStereoInOrder();
         std::cout << "PASS selected stereo and idle/active meters\n";
+        periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive();
+        std::cout << "PASS periodic disk flush and growing active partial audio\n";
+        periodicDiskFlushFailureStopsAndRetainsAnIncompleteRecording();
+        std::cout << "PASS periodic disk flush failure and incomplete retention\n";
         failedInputPreservesFinalizableAudioAndReportsIncompleteFinalization();
         std::cout << "PASS input loss and incomplete finalization\n";
         driverDiscontinuityFailsTheTakeAndPreservesAcceptedAudio();
