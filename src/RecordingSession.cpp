@@ -158,6 +158,16 @@ juce::Result validate(const qfr::RecordingSession::Configuration& config)
         return juce::Result::fail("The target folder does not exist. Choose an existing writable folder.");
     if (!config.targetFolder.hasWriteAccess())
         return juce::Result::fail("The target folder is not writable. Choose another folder or change its permissions.");
+    // Directory access checks can report success even when its ACL forbids adding files.
+    // Verify the exact operation needed for a recording, before reserving a recording name.
+    auto probe = config.targetFolder.getChildFile(".qfr-write-check-" + juce::Uuid().toString() + ".tmp");
+    auto probeStatus = std::make_shared<IoStatus>();
+    std::unique_ptr<juce::OutputStream> probeOutput;
+    if (reserve(probe, probeStatus, probeOutput) != CreateResult::created)
+        return juce::Result::fail("The target folder does not allow new files. Choose another folder or change its permissions.");
+    probeOutput.reset();
+    if (!probe.deleteFile() || probeStatus->failed)
+        return juce::Result::fail("The target folder cannot safely create and remove files. Choose another folder or change its permissions.");
     if (!std::isfinite(config.inputStreamRate) || config.inputStreamRate < 1 || config.inputStreamRate > 655350
         || std::floor(config.inputStreamRate) != config.inputStreamRate)
         return juce::Result::fail("Open an input device with a valid input stream rate before recording.");
@@ -201,6 +211,7 @@ juce::Result nextCounter(const qfr::RecordingSession::Configuration& config, uin
 
 namespace qfr
 {
+static_assert(std::atomic<uint64_t>::is_always_lock_free && std::atomic<float>::is_always_lock_free);
 struct RecordingSession::Impl
 {
     enum class Failure { none, input, overflow, writer, promotion };
@@ -268,10 +279,14 @@ struct RecordingSession::Impl
             if (!accepting.load() && inFlight.load() == 0 && head.load(std::memory_order_acquire) == read) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
+        // A writer failure can stop the consumer while one callback is copying its block.
+        // Keep the take locked until that producer is quiescent, before another start can resize/reset storage.
+        while (inFlight.load() != 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         // JUCE writes FLAC metadata during destruction. Check every underlying operation,
         // including writes/seek/flush/close performed after the last successful audio block.
         writer.reset();
         if (io->failed) fail(Failure::writer);
+        bool finalizationValid = !io->failed;
         if (!io->failed)
         {
             juce::FlacAudioFormat flac;
@@ -279,16 +294,28 @@ struct RecordingSession::Impl
             auto reader = stream ? std::unique_ptr<juce::AudioFormatReader>(flac.createReaderFor(stream.release(), true)) : nullptr;
             if (!reader || reader->sampleRate != rate || reader->numChannels != static_cast<unsigned>(channels)
                 || reader->bitsPerSample != 16 || reader->lengthInSamples != static_cast<juce::int64>(encoded))
+            {
+                finalizationValid = false;
                 fail(Failure::writer);
+            }
         }
-        bool complete = !io->failed && failure.load() != Failure::writer;
+        bool complete = finalizationValid && failure.load() != Failure::writer;
         if (complete && !promoteWithoutReplacement(partial, final)) { fail(Failure::promotion); complete = false; }
         auto reason = failure.load();
         {
             std::lock_guard lock(mutex);
             view.recordingFile = complete ? final : partial;
             view.incomplete = !complete;
-            switch (reason)
+            if (!complete)
+            {
+                auto interruption = reason == Failure::input ? juce::String("Input device was lost. ")
+                                   : reason == Failure::overflow ? juce::String("The capture buffer overflowed. ") : juce::String();
+                view.message = interruption
+                             + (!finalizationValid || reason == Failure::writer ? "Writing or finalizing the FLAC failed. "
+                                                                       : "The final recording filename could not be reserved without replacement. ")
+                             + "The incomplete recording remains at " + partial.getFullPathName();
+            }
+            else switch (reason)
             {
                 case Failure::none: view.message = "Saved " + final.getFileName(); break;
                 case Failure::input: view.message = "Input device was lost. Captured audio was finalized as " + final.getFileName(); break;
@@ -312,6 +339,7 @@ juce::Result RecordingSession::configure(const Configuration& config)
     impl->config = config;
     impl->state = State::idle;
     impl->view = {};
+    impl->capturedFrames = 0;
     impl->view.inputStreamRate = config.inputStreamRate;
     impl->view.outputChannels = config.rightInputChannel < 0 ? 1 : 2;
     impl->selection.store(static_cast<uint64_t>(static_cast<uint32_t>(config.leftInputChannel))
@@ -322,9 +350,13 @@ juce::Result RecordingSession::refreshPreview()
 {
     std::lock_guard lock(impl->mutex);
     if (impl->locked()) return juce::Result::fail("The recording filename is locked until finalization ends.");
-    return impl->updatePreview();
+    auto state = impl->state.load();
+    auto message = impl->view.message;
+    auto result = impl->updatePreview();
+    if (state == State::succeeded || state == State::failed) impl->view.message = message;
+    return result;
 }
-juce::Result RecordingSession::start()
+juce::Result RecordingSession::start() try
 {
     if (impl->locked()) return juce::Result::fail("A recording is still capturing or finalizing.");
     waitForStop();
@@ -335,11 +367,11 @@ juce::Result RecordingSession::start()
         impl->view.message = message;
         return juce::Result::fail(message);
     };
+    impl->view.recordingFile = {}; impl->view.incomplete = false; impl->capturedFrames = 0;
     auto valid = impl->updatePreview();
     if (valid.failed()) return reject(valid.getErrorMessage());
     if (impl->options.captureCapacityFrames == 0 || impl->options.captureCapacityFrames > 16777216)
         return reject("The capture buffer size is invalid.");
-    impl->view.recordingFile = {}; impl->view.incomplete = false;
     uint64_t next = 1;
     auto counter = nextCounter(impl->config, next);
     if (counter.failed()) return reject(counter.getErrorMessage());
@@ -373,16 +405,35 @@ juce::Result RecordingSession::start()
     impl->accepting = true;
     impl->worker = std::thread([p = impl.get(), writer = std::move(writer), io, partial, final,
                               rate = impl->config.inputStreamRate, channels]() mutable
-    { p->writeRecording(std::move(writer), io, partial, final, rate, channels); });
+    {
+        try { p->writeRecording(std::move(writer), io, partial, final, rate, channels); }
+        catch (...)
+        {
+            p->accepting = false;
+            while (p->inFlight.load() != 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::lock_guard workerLock(p->mutex);
+            p->view.recordingFile = partial; p->view.incomplete = true;
+            p->view.message = "Recording stopped after a writer failure. The incomplete recording remains at " + partial.getFullPathName();
+            p->state = State::failed;
+        }
+    });
     return juce::Result::ok();
+}
+catch (...)
+{
+    impl->accepting = false;
+    while (impl->inFlight.load() != 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::lock_guard lock(impl->mutex);
+    impl->state = State::failed;
+    impl->view.message = "Recording could not start. Check the target folder, disk space, and available memory.";
+    if (impl->view.incomplete) impl->view.message += " The incomplete recording remains at " + impl->view.recordingFile.getFullPathName();
+    return juce::Result::fail(impl->view.message);
 }
 void RecordingSession::requestStop()
 {
-    if (impl->state.load() == State::recording)
-    {
-        impl->state = State::finalizing;
+    auto expected = State::recording;
+    if (impl->state.compare_exchange_strong(expected, State::finalizing))
         impl->accepting = false;
-    }
 }
 void RecordingSession::waitForStop() { if (impl->worker.joinable()) impl->worker.join(); }
 RecordingSession::Snapshot RecordingSession::snapshot() const
@@ -393,7 +444,17 @@ RecordingSession::Snapshot RecordingSession::snapshot() const
     result.elapsedSeconds = result.inputStreamRate > 0 ? static_cast<double>(impl->capturedFrames.load()) / result.inputStreamRate : 0;
     return result;
 }
-RecordingSession::Levels RecordingSession::readLevels() noexcept { return {}; }
+RecordingSession::Levels RecordingSession::readLevels() noexcept
+{
+    Levels levels;
+    levels.channels = static_cast<int32_t>(impl->selection.load() >> 32) < 0 ? 1 : 2;
+    for (int channel = 0; channel < 2; ++channel)
+    {
+        levels.peak[channel] = impl->peaks[channel].exchange(0);
+        levels.clipped[channel] = impl->clipped[channel].exchange(false);
+    }
+    return levels;
+}
 void RecordingSession::processInput(const float* const* inputs, int inputChannels, int frames) noexcept
 {
     if (frames <= 0) return;
@@ -408,6 +469,15 @@ void RecordingSession::processInput(const float* const* inputs, int inputChannel
     {
         if (capture) impl->fail(Impl::Failure::input);
         impl->inFlight.fetch_sub(1); return;
+    }
+    for (int channel = 0; channel < channels; ++channel)
+    {
+        const float* source = inputs[channel == 0 ? left : right];
+        float peak = 0;
+        for (int frame = 0; frame < frames; ++frame) peak = std::max(peak, std::abs(source[frame]));
+        auto previous = impl->peaks[channel].load(std::memory_order_relaxed);
+        while (previous < peak && !impl->peaks[channel].compare_exchange_weak(previous, peak, std::memory_order_relaxed)) {}
+        if (peak >= 1) impl->clipped[channel].store(true, std::memory_order_relaxed);
     }
     if (capture)
     {
@@ -430,5 +500,11 @@ void RecordingSession::processInput(const float* const* inputs, int inputChannel
     }
     impl->inFlight.fetch_sub(1);
 }
-void RecordingSession::inputLost() noexcept { if (impl->accepting.load()) impl->fail(Impl::Failure::input); }
+void RecordingSession::inputLost() noexcept
+{
+    // Device error notifications can race with a requested stop just like an audio block.
+    impl->inFlight.fetch_add(1);
+    if (impl->accepting.load()) impl->fail(Impl::Failure::input);
+    impl->inFlight.fetch_sub(1);
+}
 }
