@@ -214,7 +214,7 @@ namespace qfr
 static_assert(std::atomic<uint64_t>::is_always_lock_free && std::atomic<float>::is_always_lock_free);
 struct RecordingSession::Impl
 {
-    enum class Failure { none, input, overflow, writer, promotion };
+    enum class Failure { none, input, discontinuity, overflow, writer, flush, promotion };
     explicit Impl(Options optionsIn) : options(std::move(optionsIn)) {}
     Options options;
     Configuration config;
@@ -250,13 +250,24 @@ struct RecordingSession::Impl
         view.message = result.failed() ? result.getErrorMessage() : "Ready to record.";
         return result;
     }
-    void writeRecording(std::unique_ptr<juce::AudioFormatWriter> writer, std::shared_ptr<IoStatus> io,
+    void writeRecording(std::unique_ptr<juce::AudioFormatWriter> writer, juce::OutputStream* recordingOutput, std::shared_ptr<IoStatus> io,
                         juce::File partial, juce::File final, double rate, int channels)
     {
         std::array<float, 8192> block {};
         uint64_t encoded = 0;
+        bool diskFlushFailed = false;
+        auto nextDiskFlush = std::chrono::steady_clock::now() + options.diskFlushInterval;
         for (;;)
         {
+            if (std::chrono::steady_clock::now() >= nextDiskFlush)
+            {
+                // FLAC has no codec flush API. Flush the encoded bytes through the
+                // checked native stream; leave encoder state and metadata for Stop.
+                try { recordingOutput->flush(); }
+                catch (...) { io->failed = true; }
+                if (io->failed) { diskFlushFailed = true; fail(Failure::flush); break; }
+                nextDiskFlush = std::chrono::steady_clock::now() + options.diskFlushInterval;
+            }
             auto read = tail.load(std::memory_order_relaxed);
             auto available = head.load(std::memory_order_acquire) - read;
             if (available != 0)
@@ -299,7 +310,7 @@ struct RecordingSession::Impl
                 fail(Failure::writer);
             }
         }
-        bool complete = finalizationValid && failure.load() != Failure::writer;
+        bool complete = finalizationValid && failure.load() != Failure::writer && failure.load() != Failure::flush;
         if (complete && !promoteWithoutReplacement(partial, final)) { fail(Failure::promotion); complete = false; }
         auto reason = failure.load();
         {
@@ -309,9 +320,11 @@ struct RecordingSession::Impl
             if (!complete)
             {
                 auto interruption = reason == Failure::input ? juce::String("Input device was lost. ")
+                                   : reason == Failure::discontinuity ? juce::String("Input audio discontinuity detected. The driver reported missing samples. ")
                                    : reason == Failure::overflow ? juce::String("The capture buffer overflowed. ") : juce::String();
                 view.message = interruption
-                             + (!finalizationValid || reason == Failure::writer ? "Writing or finalizing the FLAC failed. "
+                             + (diskFlushFailed ? "Periodic disk flush failed. "
+                                : !finalizationValid || reason == Failure::writer ? "Writing or finalizing the FLAC failed. "
                                                                        : "The final recording filename could not be reserved without replacement. ")
                              + "The incomplete recording remains at " + partial.getFullPathName();
             }
@@ -319,8 +332,10 @@ struct RecordingSession::Impl
             {
                 case Failure::none: view.message = "Saved " + final.getFileName(); break;
                 case Failure::input: view.message = "Input device was lost. Captured audio was finalized as " + final.getFileName(); break;
+                case Failure::discontinuity: view.message = "Input audio discontinuity detected. The driver reported missing samples. Captured audio was finalized as " + final.getFileName(); break;
                 case Failure::overflow: view.message = "Recording stopped because the capture buffer overflowed. Captured audio was finalized as " + final.getFileName(); break;
                 case Failure::writer: view.message = "Writing or finalizing the FLAC failed. The incomplete recording remains at " + partial.getFullPathName(); break;
+                case Failure::flush: view.message = "Periodic disk flush failed. The incomplete recording remains at " + partial.getFullPathName(); break;
                 case Failure::promotion: view.message = "The final recording filename could not be reserved without replacement. The incomplete recording remains at " + partial.getFullPathName(); break;
             }
             uint64_t next = 1;
@@ -372,6 +387,8 @@ juce::Result RecordingSession::start() try
     if (valid.failed()) return reject(valid.getErrorMessage());
     if (impl->options.captureCapacityFrames == 0 || impl->options.captureCapacityFrames > 16777216)
         return reject("The capture buffer size is invalid.");
+    if (impl->options.diskFlushInterval.count() <= 0)
+        return reject("The disk flush interval must be positive.");
     uint64_t next = 1;
     auto counter = nextCounter(impl->config, next);
     if (counter.failed()) return reject(counter.getErrorMessage());
@@ -393,6 +410,7 @@ juce::Result RecordingSession::start() try
     if (impl->options.outputAdapter) stream = impl->options.outputAdapter(std::move(stream));
     if (!stream) return reject("The recording output could not be opened. The incomplete recording remains in the target folder.");
     stream = std::make_unique<CheckedOutput>(std::move(stream), io);
+    auto* recordingOutput = stream.get(); // Owned by the successful writer until its destruction.
     juce::FlacAudioFormat flac;
     auto channels = impl->config.rightInputChannel < 0 ? 1 : 2;
     auto writer = flac.createWriterFor(stream, juce::AudioFormatWriterOptions().withSampleRate(impl->config.inputStreamRate)
@@ -403,10 +421,10 @@ juce::Result RecordingSession::start() try
     impl->view.message = "Recording " + partial.getFileName();
     impl->state = State::recording;
     impl->accepting = true;
-    impl->worker = std::thread([p = impl.get(), writer = std::move(writer), io, partial, final,
+    impl->worker = std::thread([p = impl.get(), writer = std::move(writer), recordingOutput, io, partial, final,
                               rate = impl->config.inputStreamRate, channels]() mutable
     {
-        try { p->writeRecording(std::move(writer), io, partial, final, rate, channels); }
+        try { p->writeRecording(std::move(writer), recordingOutput, io, partial, final, rate, channels); }
         catch (...)
         {
             p->accepting = false;
@@ -505,6 +523,12 @@ void RecordingSession::inputLost() noexcept
     // Device error notifications can race with a requested stop just like an audio block.
     impl->inFlight.fetch_add(1);
     if (impl->accepting.load()) impl->fail(Impl::Failure::input);
+    impl->inFlight.fetch_sub(1);
+}
+void RecordingSession::inputDiscontinuity() noexcept
+{
+    impl->inFlight.fetch_add(1);
+    if (impl->accepting.load()) impl->fail(Impl::Failure::discontinuity);
     impl->inFlight.fetch_sub(1);
 }
 }

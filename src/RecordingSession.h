@@ -5,6 +5,7 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <chrono>
 
 namespace qfr
 {
@@ -27,6 +28,8 @@ public:
         size_t captureCapacityFrames = 262144;
         // Optional disk boundary adapter, also usable to simulate output failures.
         std::function<std::unique_ptr<juce::OutputStream>(std::unique_ptr<juce::OutputStream>)> outputAdapter;
+        // Writer-thread durability policy; the application uses five seconds.
+        std::chrono::milliseconds diskFlushInterval { 5000 };
     };
 
     struct Snapshot
@@ -68,6 +71,7 @@ public:
     // Call while idle as well, for selected-channel metering.
     void processInput(const float* const* inputs, int inputChannels, int frames) noexcept;
     void inputLost() noexcept; // Safe from an input-device callback; preserves queued captured audio.
+    void inputDiscontinuity() noexcept; // Report driver overruns/missing samples without claiming input loss.
 
 private:
     struct Impl;

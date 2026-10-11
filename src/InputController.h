@@ -32,6 +32,7 @@ public:
     juce::String inputDevice() const { return selectedDevice; }
     juce::StringArray channels() const { return channelNames; }
     double sampleRate() const noexcept { return streamRate.load(); }
+    double sampleRateBeforeOpen() const noexcept { return rateBeforeOpen; }
     std::function<void()> onDevicesChanged;
 
 private:
@@ -50,6 +51,9 @@ private:
     juce::String selectedDriver, selectedDevice;
     juce::StringArray channelNames;
     std::atomic<double> streamRate { 0 };
+    double rateBeforeOpen = 0;
+    std::atomic<juce::AudioIODevice*> callbackDevice { nullptr };
+    std::atomic<int> lastXRunCount { -1 };
     std::atomic<bool> intentionalStop { true }, deviceLost { false }, started { false };
 };
 }
