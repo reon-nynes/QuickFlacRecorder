@@ -13,6 +13,7 @@ class RecordingSession final
 {
 public:
     enum class State { idle, recording, finalizing, succeeded, failed };
+    enum class ResultCode { none, ready, recording, finalizing, saved, failed };
 
     struct Configuration
     {
@@ -35,7 +36,8 @@ public:
     struct Snapshot
     {
         State state = State::idle;
-        juce::String message;
+        ResultCode resultCode = ResultCode::none;
+        juce::String message; // English failure diagnostics until the recovery-message migration.
         juce::File nextFile;
         juce::File recordingFile;
         bool incomplete = false;

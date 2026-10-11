@@ -243,11 +243,12 @@ struct RecordingSession::Impl
     {
         view.nextFile = juce::File{};
         auto valid = validate(config);
-        if (valid.failed()) { view.message = valid.getErrorMessage(); return valid; }
+        if (valid.failed()) { view.resultCode = ResultCode::none; view.message = valid.getErrorMessage(); return valid; }
         uint64_t next = 1;
         auto result = nextCounter(config, next);
         if (result.wasOk()) view.nextFile = config.targetFolder.getChildFile(numberedName(config.recordingPrefix, next));
-        view.message = result.failed() ? result.getErrorMessage() : "Ready to record.";
+        view.resultCode = result.failed() ? ResultCode::none : ResultCode::ready;
+        view.message = result.getErrorMessage();
         return result;
     }
     void writeRecording(std::unique_ptr<juce::AudioFormatWriter> writer, juce::OutputStream* recordingOutput, std::shared_ptr<IoStatus> io,
@@ -330,7 +331,7 @@ struct RecordingSession::Impl
             }
             else switch (reason)
             {
-                case Failure::none: view.message = "Saved " + final.getFileName(); break;
+                case Failure::none: view.message.clear(); break;
                 case Failure::input: view.message = "Input device was lost. Captured audio was finalized as " + final.getFileName(); break;
                 case Failure::discontinuity: view.message = "Input audio discontinuity detected. The driver reported missing samples. Captured audio was finalized as " + final.getFileName(); break;
                 case Failure::overflow: view.message = "Recording stopped because the capture buffer overflowed. Captured audio was finalized as " + final.getFileName(); break;
@@ -367,8 +368,13 @@ juce::Result RecordingSession::refreshPreview()
     if (impl->locked()) return juce::Result::fail("The recording filename is locked until finalization ends.");
     auto state = impl->state.load();
     auto message = impl->view.message;
+    auto resultCode = impl->view.resultCode;
     auto result = impl->updatePreview();
-    if (state == State::succeeded || state == State::failed) impl->view.message = message;
+    if (state == State::succeeded || state == State::failed)
+    {
+        impl->view.message = message;
+        impl->view.resultCode = resultCode;
+    }
     return result;
 }
 juce::Result RecordingSession::start() try
@@ -418,7 +424,7 @@ juce::Result RecordingSession::start() try
     if (!writer || io->failed) return reject("The FLAC writer could not start. The incomplete recording remains in the target folder.");
     impl->ring.resize(impl->options.captureCapacityFrames * 2);
     impl->head = 0; impl->tail = 0; impl->capturedFrames = 0; impl->failure = Impl::Failure::none;
-    impl->view.message = "Recording " + partial.getFileName();
+    impl->view.message.clear();
     impl->state = State::recording;
     impl->accepting = true;
     impl->worker = std::thread([p = impl.get(), writer = std::move(writer), recordingOutput, io, partial, final,
@@ -459,6 +465,14 @@ RecordingSession::Snapshot RecordingSession::snapshot() const
     std::lock_guard lock(impl->mutex);
     auto result = impl->view;
     result.state = impl->state.load(std::memory_order_acquire);
+    switch (result.state)
+    {
+        case State::idle: break;
+        case State::recording: result.resultCode = ResultCode::recording; break;
+        case State::finalizing: result.resultCode = ResultCode::finalizing; break;
+        case State::succeeded: result.resultCode = ResultCode::saved; break;
+        case State::failed: result.resultCode = ResultCode::failed; break;
+    }
     result.elapsedSeconds = result.inputStreamRate > 0 ? static_cast<double>(impl->capturedFrames.load()) / result.inputStreamRate : 0;
     return result;
 }

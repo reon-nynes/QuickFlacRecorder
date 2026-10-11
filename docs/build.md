@@ -2,7 +2,7 @@
 
 Use CMake 3.22 or later, a C++20 compiler, and Git. The project fetches JUCE 9.0.3 during configuration. A first configure needs network access. To use a local checkout or the JUCE copy in a preview's source archive, add `-DFETCHCONTENT_SOURCE_DIR_JUCE=<absolute path to JUCE>` to the configure command. Preserve the pinned version.
 
-All platforms build the `QuickFlacRecorder` GUI and `RecorderSessionTests` console target. Run `ctest` with `--no-tests=error` so a missing test suite cannot appear to pass. The tests exercise the agreed recording-session boundary with controlled audio and a real temporary target folder. They do not establish real microphone or native UI behavior.
+All platforms build the `QuickFlacRecorder` GUI and the `RecorderSessionTests`, `RecorderTranslationTests`, `RecorderPresentationTests`, and `RecorderUiTests` targets. Run `ctest` with `--no-tests=error` so a missing test suite cannot appear to pass. Session tests use controlled audio and a real temporary target folder. Localization tests use the public translation/resolver and adapter-input boundaries; UI tests exercise native JUCE controls with isolated settings. Ordinary CTest does not establish real microphone behavior. The optional Windows hardware/render check and contributor procedure are in [localization.md](localization.md).
 
 ## Windows x64
 
@@ -12,7 +12,7 @@ From the repository in PowerShell:
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
-cmake --build build --config Release --target QuickFlacRecorder RecorderSessionTests --parallel 2
+cmake --build build --config Release --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
 ctest --test-dir build -C Release --output-on-failure --no-tests=error
 & .\build\QuickFlacRecorder_artefacts\Release\QuickFlacRecorder.exe
 ```
@@ -34,7 +34,7 @@ Install Xcode's command-line tools, CMake, Ninja, and Python 3. Configure both s
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
   '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64' -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
-cmake --build build --target QuickFlacRecorder RecorderSessionTests --parallel 2
+cmake --build build --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
 ctest --test-dir build --output-on-failure --no-tests=error
 open build/QuickFlacRecorder_artefacts/Release/QuickFlacRecorder.app
 bash scripts/package-macos.sh build
@@ -52,7 +52,7 @@ sudo apt-get install build-essential cmake ninja-build git ca-certificates curl 
   pkg-config libasound2-dev libjack-jackd2-dev libfreetype6-dev libfontconfig1-dev \
   libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libxi-dev libgl1-mesa-dev xvfb xauth file
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
-cmake --build build --target QuickFlacRecorder RecorderSessionTests --parallel 2
+cmake --build build --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
 xvfb-run -a ctest --test-dir build --output-on-failure --no-tests=error
 bash scripts/package-linux.sh build
 ```
@@ -72,6 +72,8 @@ bash scripts/verify-linux-baseline.sh dist/QuickFlacRecorder-linux-x64.tar.gz
 ```
 
 ## Source and verification records
+
+Every package script runs `scripts/verify-translations.py` against the packaged recorder binary and writes `localization-resources.txt`. It requires the shared registry and every registered catalog to match the embedded source bytes, allowing platform line endings. macOS also checks each localized microphone explanation in the bundle. The Linux baseline repeats the catalog inspection after AppImage extraction. The formatter has no additional runtime/data dependency. Catalog validation and rendering checks remain separate from this packaging inspection.
 
 Long recordings keep a fixed capture buffer of 262144 frames and a bounded codec block. The writer thread flushes encoded bytes to the native disk stream every five seconds with `FlushFileBuffers` on Windows and `fsync` on macOS/Linux. The deadline uses a monotonic clock and also runs while audio continues to arrive. Encoding and flushing stay off the audio callback. A flush failure stops capture, reports the failed flush, and retains an incomplete `.partial.flac`; it never promotes that take as a successful recording.
 

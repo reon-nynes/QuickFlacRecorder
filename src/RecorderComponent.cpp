@@ -8,6 +8,7 @@
 
 namespace qfr
 {
+using i18n::MessageId;
 namespace
 {
 juce::File downloadsFolder()
@@ -49,9 +50,10 @@ void LevelMeter::update(const RecordingSession::Levels& levels)
         db[channel] = juce::jmax(peakDb, db[channel] - 2.4f);
         if (levels.clipped[channel]) clipUntil[channel] = now + 1200;
     }
-    setTitle("Selected input levels");
-    setDescription(juce::String(db[0], 1) + " dBFS"
-                   + (channels == 2 ? ", right " + juce::String(db[1], 1) + " dBFS" : ""));
+    setTitle(translation.text(MessageId::MeterTitle));
+    setDescription(translation.text(MessageId::MeterDescription, {
+        { "mode", juce::String(channels == 2 ? "stereo" : "mono") },
+        { "left", juce::String(db[0], 1) }, { "right", juce::String(db[1], 1) } }));
     repaint();
 }
 
@@ -69,8 +71,10 @@ void LevelMeter::paint(juce::Graphics& g)
         const auto bounds = juce::Rectangle<float>(static_cast<float>(barX), static_cast<float>(y),
                                                    static_cast<float>(barWidth), static_cast<float>(barHeight));
         g.setColour(theme::muted);
-        g.drawText(channels == 1 ? "M" : (channel == 0 ? "L" : "R"), 0, y, 14, barHeight,
+        g.setFont(theme::body(theme::secondarySize));
+        g.drawText(translation.text(channels == 1 ? MessageId::MeterMono : (channel == 0 ? MessageId::MeterLeft : MessageId::MeterRight)), 0, y, 14, barHeight,
                    juce::Justification::centred);
+        g.setFont(theme::data());
         g.setColour(theme::surface);
         g.fillRoundedRectangle(bounds, 2.0f);
         const auto fraction = juce::jlimit(0.0f, 1.0f, (db[static_cast<size_t>(channel)] + 60.0f) / 60.0f);
@@ -87,16 +91,19 @@ void LevelMeter::paint(juce::Graphics& g)
         if (now < clipUntil[static_cast<size_t>(channel)])
         {
             g.setColour(theme::danger);
-            g.drawText("CLIP", getWidth() - 34, y, 34, barHeight, juce::Justification::centredRight);
+            g.setFont(theme::body(theme::secondarySize));
+            g.drawText(translation.text(MessageId::Clip), getWidth() - 34, y, 34, barHeight, juce::Justification::centredRight);
         }
     }
     g.setColour(theme::muted);
+    g.setFont(theme::data());
     g.drawText("-60", barX, 48, 28, 16, juce::Justification::left);
     g.drawText("-30", barX + barWidth / 2 - 14, 48, 28, 16, juce::Justification::centred);
     g.drawText("0 dBFS", barX + barWidth - 50, 48, 50, 16, juce::Justification::right);
 }
 
-RecorderComponent::RecorderComponent(juce::PropertiesFile& settings) : preferences(settings)
+RecorderComponent::RecorderComponent(juce::PropertiesFile& settings, i18n::Translation selected)
+    : preferences(settings), translation(std::move(selected))
 {
     setLookAndFeel(&lookAndFeel);
     setWantsKeyboardFocus(true);
@@ -109,13 +116,15 @@ RecorderComponent::RecorderComponent(juce::PropertiesFile& settings) : preferenc
         addAndMakeVisible(item);
         if (control) control->setTitle(text);
     };
-    label(folderLabel, "Target folder", &targetFolder);
-    label(prefixLabel, "Prefix", &recordingPrefix);
-    label(driverLabel, "Audio driver", &audioDriver);
-    label(deviceLabel, "Input device", &inputDevice);
-    label(modeLabel, "Channels", &mode);
-    label(leftLabel, "Mono input", &leftChannel);
-    label(rightLabel, "Right input", &rightChannel);
+    label(folderLabel, translation.text(MessageId::TargetFolder), &targetFolder);
+    label(prefixLabel, translation.text(MessageId::Prefix), &recordingPrefix);
+    label(driverLabel, translation.text(MessageId::AudioDriver), &audioDriver);
+    label(deviceLabel, translation.text(MessageId::InputDevice), &inputDevice);
+    label(modeLabel, translation.text(MessageId::Channels), &mode);
+    label(leftLabel, translation.text(MessageId::MonoInput), &leftChannel);
+    label(rightLabel, translation.text(MessageId::RightInput), &rightChannel);
+    browse.setButtonText(translation.text(MessageId::Browse));
+    refreshInputs.setButtonText(translation.text(MessageId::Refresh));
     for (auto* editor : { &targetFolder, &recordingPrefix })
     {
         addAndMakeVisible(editor);
@@ -126,10 +135,11 @@ RecorderComponent::RecorderComponent(juce::PropertiesFile& settings) : preferenc
     for (auto* selector : { &audioDriver, &inputDevice, &mode, &leftChannel, &rightChannel })
     {
         addAndMakeVisible(selector);
-        selector->setTextWhenNothingSelected("Choose...");
+        selector->setTextWhenNothingSelected(translation.text(MessageId::Choose));
+        selector->setTextWhenNoChoicesAvailable(translation.text(MessageId::NoChoices));
         selector->setScrollWheelEnabled(false);
     }
-    for (auto* button : { &browse, &recordButton, &refreshInputs }) addAndMakeVisible(button);
+    for (juce::TextButton* button : { &browse, static_cast<juce::TextButton*>(&recordButton), &refreshInputs }) addAndMakeVisible(button);
     for (auto* item : { &filename, &format, &elapsed, &status })
     {
         addAndMakeVisible(item);
@@ -138,49 +148,47 @@ RecorderComponent::RecorderComponent(juce::PropertiesFile& settings) : preferenc
     }
     recordButton.setComponentID("recordingAction");
     filename.setFont(theme::data());
-    filename.setTitle("Next filename");
+    filename.setTitle(translation.text(MessageId::NextFilenameTitle));
     format.setColour(juce::Label::textColourId, theme::muted);
     format.setFont(theme::body(theme::secondarySize));
     elapsed.setFont(theme::data(theme::timerSize));
     elapsed.setJustificationType(juce::Justification::centred);
-    elapsed.setTitle("Elapsed recording time");
+    elapsed.setTitle(translation.text(MessageId::ElapsedTitle));
     status.setJustificationType(juce::Justification::topLeft);
-    status.setTitle("Recording status");
+    status.setTitle(translation.text(MessageId::StatusTitle));
     addAndMakeVisible(meter);
 
     targetFolder.setText(preferences.getValue("targetFolder", downloadsFolder().getFullPathName()), false);
     recordingPrefix.setText(juce::Time::getCurrentTime().formatted("%Y-%m-%d_%H-%M-%S"), false);
-    targetFolder.setTooltip("Choose an existing writable folder. Recordings will only be saved here.");
-    recordingPrefix.setTooltip("The app appends _01.flac, _02.flac, and later counters. The prefix stays across takes.");
-    audioDriver.setTooltip("Shared audio is the normal system path. Exclusive or ASIO requires an available device.");
-    inputDevice.setTooltip("Choose the microphone or audio interface used for both the meter and recording.");
-    recordButton.setTooltip("Start or stop a recording. Space works when a field or selector does not have focus.");
-    refreshInputs.setTooltip("Look for connected inputs again, then choose a replacement if needed.");
+    inputDevice.setTooltip(translation.text(MessageId::DeviceTip));
+    recordButton.setTooltip(translation.text(MessageId::RecordTip));
+    refreshInputs.setTooltip(translation.text(MessageId::RefreshTip));
     browse.onClick = [this] { chooseFolder(); };
     recordButton.onClick = [this] { toggleRecording(); };
     refreshInputs.onClick = [this]
     {
         input.rescan();
         populateDrivers();
-        populateDevices(inputDevice.getText());
+        populateDevices(selectedDevice);
         openInput();
     };
     audioDriver.onChange = [this]
     {
-        populateDevices(input.defaultDevice(audioDriver.getText()));
+        selectedDriver = driverNames[audioDriver.getSelectedId() - 1];
+        populateDevices(input.defaultDevice(selectedDriver));
         openInput();
     };
-    inputDevice.onChange = [this] { openInput(); };
-    mode.addItem("Mono", 1);
-    mode.addItem("Stereo", 2);
+    inputDevice.onChange = [this] { selectedDevice = deviceNames[inputDevice.getSelectedId() - 1]; openInput(); };
+    mode.addItem(translation.text(MessageId::Mono), 1);
+    mode.addItem(translation.text(MessageId::Stereo), 2);
     mode.setSelectedId(preferences.getBoolValue("stereo", false) ? 2 : 1, juce::dontSendNotification);
     mode.onChange = [this] { configureSession(); resized(); savePreferences(); };
     leftChannel.onChange = rightChannel.onChange = [this] { configureSession(); savePreferences(); };
     populateDrivers();
-    populateDevices(preferences.getValue("inputDevice", input.defaultDevice(audioDriver.getText())));
+    populateDevices(preferences.getValue("inputDevice", input.defaultDevice(selectedDriver)));
     input.onDevicesChanged = [this]
     {
-        populateDevices(inputDevice.getText());
+        populateDevices(selectedDevice);
         if (! input.isAvailable()) inputError = input.pollError();
         updateStatus();
     };
@@ -219,25 +227,25 @@ void RecorderComponent::requestMicrophonePermission()
 
 void RecorderComponent::populateDrivers()
 {
-    const auto selected = audioDriver.getText().isNotEmpty() ? audioDriver.getText().upToFirstOccurrenceOf(" (unavailable)", false, false)
-        : preferences.getValue("audioDriver", input.defaultDriver());
+    if (selectedDriver.isEmpty()) selectedDriver = preferences.getValue("audioDriver", input.defaultDriver());
     audioDriver.clear(juce::dontSendNotification);
-    const auto drivers = input.drivers();
-    audioDriver.addItemList(drivers, 1);
-    if (drivers.contains(selected)) audioDriver.setSelectedItemIndex(drivers.indexOf(selected), juce::dontSendNotification);
-    else audioDriver.setText(selected + " (unavailable)", juce::dontSendNotification);
+    driverNames = input.drivers();
+    audioDriver.addItemList(driverNames, 1);
+    if (driverNames.contains(selectedDriver)) audioDriver.setSelectedItemIndex(driverNames.indexOf(selectedDriver), juce::dontSendNotification);
+    else audioDriver.setText(translation.text(MessageId::Unavailable, { { "name", selectedDriver } }), juce::dontSendNotification);
 }
 
 void RecorderComponent::populateDevices(const juce::String& selected)
 {
     inputDevice.clear(juce::dontSendNotification);
-    const auto devices = input.devices(audioDriver.getText());
-    inputDevice.addItemList(devices, 1);
-    if (devices.contains(selected)) inputDevice.setSelectedItemIndex(devices.indexOf(selected), juce::dontSendNotification);
-    else if (selected.isNotEmpty()) inputDevice.setText(selected, juce::dontSendNotification);
-    else inputDevice.setText("No input available", juce::dontSendNotification);
-    inputDevice.setTooltip(devices.contains(selected) ? selected
-        : selected + " is unavailable. Choose an available input device.");
+    selectedDevice = selected;
+    deviceNames = input.devices(selectedDriver);
+    inputDevice.addItemList(deviceNames, 1);
+    if (deviceNames.contains(selectedDevice)) inputDevice.setSelectedItemIndex(deviceNames.indexOf(selectedDevice), juce::dontSendNotification);
+    else if (selectedDevice.isNotEmpty()) inputDevice.setText(translation.text(MessageId::Unavailable, { { "name", selectedDevice } }), juce::dontSendNotification);
+    else inputDevice.setText(translation.text(MessageId::NoInput), juce::dontSendNotification);
+    inputDevice.setTooltip(deviceNames.contains(selectedDevice) ? selectedDevice
+        : translation.text(MessageId::DeviceUnavailableTip, { { "name", selectedDevice } }));
 }
 
 void RecorderComponent::populateChannels()
@@ -263,7 +271,7 @@ void RecorderComponent::openInput()
 {
     if (session.snapshot().controlsLocked()) return;
     if (! microphoneAllowed) { configureSession(); return; }
-    const auto result = input.open(audioDriver.getText(), inputDevice.getText());
+    const auto result = input.open(selectedDriver, selectedDevice);
     inputError = result.getErrorMessage();
     populateChannels();
     configureSession();
@@ -333,31 +341,35 @@ void RecorderComponent::updateStatus()
     for (auto* component : std::initializer_list<juce::Component*> {
         &targetFolder, &recordingPrefix, &browse, &audioDriver, &inputDevice, &mode,
         &leftChannel, &rightChannel, &refreshInputs }) component->setEnabled(! locked);
-    recordButton.setButtonText(snapshot.state == RecordingSession::State::recording ? "Stop"
-        : (snapshot.state == RecordingSession::State::finalizing ? "Finishing..." : "Record"));
+    const auto action = recordingAction(snapshot.state);
+    recordButton.setAction(action);
+    recordButton.setButtonText(translation.text(action == RecordingAction::stop ? MessageId::Stop
+        : action == RecordingAction::finalizing ? MessageId::Finishing : MessageId::Record));
     recordButton.setColour(juce::TextButton::buttonColourId,
         snapshot.state == RecordingSession::State::recording ? theme::record.interpolatedWith(theme::surface, 0.65f)
         : snapshot.state == RecordingSession::State::finalizing ? theme::surface
         : theme::record.interpolatedWith(theme::surface, 0.85f));
     recordButton.setEnabled(snapshot.state == RecordingSession::State::recording
         || (! locked && input.isAvailable() && inputError.isEmpty() && configurationError.isEmpty()));
-    leftLabel.setText(mode.getSelectedId() == 2 ? "Left input" : "Mono input", juce::dontSendNotification);
-    leftChannel.setTitle(mode.getSelectedId() == 2 ? "Left input" : "Mono input");
+    leftLabel.setText(translation.text(mode.getSelectedId() == 2 ? MessageId::LeftInput : MessageId::MonoInput), juce::dontSendNotification);
+    leftChannel.setTitle(leftLabel.getText());
     const auto seconds = static_cast<int>(snapshot.elapsedSeconds);
     elapsed.setText(juce::String(seconds / 3600).paddedLeft('0', 2) + ":"
         + juce::String(seconds / 60 % 60).paddedLeft('0', 2) + ":"
         + juce::String(seconds % 60).paddedLeft('0', 2), juce::dontSendNotification);
-    format.setText((input.sampleRate() > 0 ? juce::String(input.sampleRate(), 0) + " Hz" : "Input unavailable")
-        + "  /  16-bit FLAC", juce::dontSendNotification);
-    filename.setText("Next  " + snapshot.nextFile.getFileName(), juce::dontSendNotification);
+    elapsed.setDescription(translation.text(MessageId::ElapsedDescription, { { "time", elapsed.getText() } }));
+    format.setText(translation.text(MessageId::Format, {
+        { "rate", input.sampleRate() > 0 ? juce::String(input.sampleRate(), 0) + " Hz" : translation.text(MessageId::InputUnavailable) },
+        { "channels", mode.getSelectedId() == 2 ? 2.0 : 1.0 } }), juce::dontSendNotification);
+    filename.setText(translation.text(MessageId::NextFilename, { { "filename", snapshot.nextFile.getFileName() } }), juce::dontSendNotification);
     filename.setTooltip(snapshot.nextFile.getFullPathName());
-    audioDriver.setTooltip(audioDriver.getText() + "\nShared audio is the normal system path. Exclusive or ASIO requires an available device.");
-    targetFolder.setTooltip(targetFolder.getText() + "\nChoose an existing writable target folder.");
-    recordingPrefix.setTooltip(recordingPrefix.getText() + "\nThe app appends _01.flac, _02.flac, and later counters.");
+    audioDriver.setTooltip(translation.text(MessageId::DriverTip, { { "name", selectedDriver } }));
+    targetFolder.setTooltip(translation.text(MessageId::FolderTip, { { "path", targetFolder.getText() } }));
+    recordingPrefix.setTooltip(translation.text(MessageId::PrefixTip, { { "prefix", recordingPrefix.getText() } }));
     leftChannel.setTooltip(leftChannel.getText());
     rightChannel.setTooltip(rightChannel.getText());
 
-    auto message = snapshot.message;
+    auto message = recordingStatus(snapshot, translation);
     auto colour = theme::muted;
     if (snapshot.state == RecordingSession::State::failed)
     {
@@ -374,7 +386,7 @@ void RecorderComponent::updateStatus()
         message = juce::String(incompleteRecordings) + " incomplete recording(s). Inspect .partial.flac files in the target folder.";
         colour = theme::warning;
     }
-    else if (! locked && message.isEmpty()) message = "Ready. Check the input level, then press Record.";
+    else if (! locked && message.isEmpty()) message = translation.text(MessageId::Ready);
     status.setColour(juce::Label::textColourId, colour);
     status.setText(message, juce::dontSendNotification);
     status.setTooltip(message);
@@ -393,7 +405,7 @@ bool RecorderComponent::keyPressed(const juce::KeyPress& key, juce::Component*)
 
 void RecorderComponent::chooseFolder()
 {
-    folderChooser = std::make_unique<juce::FileChooser>("Choose an existing target folder", juce::File(targetFolder.getText()));
+    folderChooser = std::make_unique<juce::FileChooser>(translation.text(MessageId::FolderChooserTitle), juce::File(targetFolder.getText()));
     const juce::Component::SafePointer<RecorderComponent> safeThis(this);
     folderChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
         [safeThis](const juce::FileChooser& chooser)
@@ -407,8 +419,8 @@ void RecorderComponent::savePreferences()
 {
     preferences.setValue("targetFolder", targetFolder.getText());
     // Keep unavailable remembered selections verbatim until the user replaces them.
-    if (audioDriver.getSelectedId() > 0) preferences.setValue("audioDriver", audioDriver.getText());
-    preferences.setValue("inputDevice", inputDevice.getText());
+    if (selectedDriver.isNotEmpty()) preferences.setValue("audioDriver", selectedDriver);
+    if (selectedDevice.isNotEmpty()) preferences.setValue("inputDevice", selectedDevice);
     preferences.setValue("stereo", mode.getSelectedId() == 2);
     if (leftChannel.getSelectedId() > 0) preferences.setValue("leftChannel", leftChannel.getSelectedId());
     if (rightChannel.getSelectedId() > 0) preferences.setValue("rightChannel", rightChannel.getSelectedId());
@@ -434,12 +446,12 @@ void RecorderComponent::requestClose(std::function<void()> quit)
     if (closeDialogOpen) return;
     closeDialogOpen = true;
     const juce::Component::SafePointer<RecorderComponent> safeThis(this);
-    auto* dialog = new juce::AlertWindow("Recording is still running",
-        "Keep recording, or stop and finish saving before closing QuickFlacRecorder.",
+    auto* dialog = new juce::AlertWindow(translation.text(MessageId::CloseTitle),
+        translation.text(MessageId::CloseMessage),
         juce::MessageBoxIconType::QuestionIcon, this);
-    dialog->addButton("Continue recording", 1, juce::KeyPress(juce::KeyPress::returnKey),
+    dialog->addButton(translation.text(MessageId::ContinueRecording), 1, juce::KeyPress(juce::KeyPress::returnKey),
                       juce::KeyPress(juce::KeyPress::escapeKey));
-    dialog->addButton("Stop and quit", 2);
+    dialog->addButton(translation.text(MessageId::StopAndQuit), 2);
     dialog->enterModalState(true, juce::ModalCallbackFunction::create(
         [safeThis, quit = std::move(quit)](int result) mutable
         {

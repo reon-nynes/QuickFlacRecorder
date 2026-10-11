@@ -1,0 +1,4 @@
+[
+  { "tag": "en", "name": "English", "aliases": ["en"], "resource": "en_json", "pluralRule": "oneOther" },
+  { "tag": "zh-Hans", "name": "简体中文", "aliases": ["zh"], "resource": "zhHans_json", "pluralRule": "other" }
+]

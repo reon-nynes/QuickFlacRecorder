@@ -21,8 +21,8 @@ jobs:
       - name: Configure Windows x64 with static runtime
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
       - name: Build
-        run: cmake --build build --config Release --target QuickFlacRecorder RecorderSessionTests --parallel 2
-      - name: Check recording-session behavior
+        run: cmake --build build --config Release --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
+      - name: Check recording, localization, and native controls
         run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
       - name: Inspect and package the executable
         shell: pwsh
@@ -44,8 +44,8 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
           '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64' -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
       - name: Build
-        run: cmake --build build --target QuickFlacRecorder RecorderSessionTests --parallel 2
-      - name: Check recording-session behavior on the runner architecture
+        run: cmake --build build --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
+      - name: Check recording, localization, and native controls on the runner architecture
         run: ctest --test-dir build --output-on-failure --no-tests=error
       - name: Inspect and package the universal app
         run: bash scripts/package-macos.sh build
@@ -74,8 +74,8 @@ jobs:
       - name: Configure Linux x64
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
       - name: Build
-        run: cmake --build build --target QuickFlacRecorder RecorderSessionTests --parallel 2
-      - name: Check recording-session behavior
+        run: cmake --build build --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
+      - name: Check recording, localization, and native controls
         run: xvfb-run -a ctest --test-dir build --output-on-failure --no-tests=error
       - name: Package AppImage and license notices
         env:

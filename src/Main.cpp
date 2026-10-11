@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "RecorderComponent.h"
+#include "localization/SystemLanguages.h"
 
 namespace qfr
 {
 class MainWindow final : public juce::DocumentWindow
 {
 public:
-    MainWindow(juce::PropertiesFile& preferences, std::function<void()> quit)
+    MainWindow(juce::PropertiesFile& preferences, i18n::Translation translation, std::function<void()> quit)
         : DocumentWindow("QuickFlacRecorder", theme::background, DocumentWindow::closeButton
                           | DocumentWindow::minimiseButton), quitApplication(std::move(quit))
     {
         setUsingNativeTitleBar(true);
-        recorder = new RecorderComponent(preferences);
+        recorder = new RecorderComponent(preferences, std::move(translation));
         setContentOwned(recorder, true);
         setResizable(false, false);
         centreWithSize(getWidth(), getHeight());
@@ -45,7 +46,10 @@ public:
         options.osxLibrarySubFolder = "Application Support";
         options.storageFormat = juce::PropertiesFile::storeAsXML;
         preferences = std::make_unique<juce::PropertiesFile>(options);
-        window = std::make_unique<MainWindow>(*preferences, [this] { quit(); });
+        // Re-query the current user's interface preferences on every launch.
+        // Recorder settings never persist or override this immutable selection.
+        i18n::Translation translation(i18n::systemLanguagePreferences());
+        window = std::make_unique<MainWindow>(*preferences, std::move(translation), [this] { quit(); });
     }
 
     void shutdown() override

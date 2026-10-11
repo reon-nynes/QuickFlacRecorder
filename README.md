@@ -4,6 +4,8 @@ QuickFlacRecorder is a compact desktop recorder that saves a selected mono input
 
 Choose an existing target folder, check the recording prefix and next filename, select the audio driver and input device, then watch the level meter and press Record. Press Stop to finish the file. The app retains the recording prefix across takes and advances the counter without replacing existing files. A take keeps its `.partial.flac` name until finalization succeeds.
 
+The normal recording flow appears in English or Simplified Chinese according to your system's preferred interface languages. The app checks those preferences on each launch and uses English when no supported language is found. Catalogs are embedded in the portable app. Error and recovery messages remain English pending the following localization slice. See [the localization contributor guide](docs/localization.md) and [Windows evidence](docs/validation/localization.md).
+
 The supported delivery targets are Windows 10/11 x64, macOS 12 or later with one universal Intel/Apple Silicon app, and Linux x64 with an Ubuntu 22.04 baseline. The Linux baseline is a starting compatibility target. A successful build does not establish microphone, permission, or device behavior on every platform.
 
 Preview downloads come from the [build and package workflow](https://github.com/reon-nynes/QuickFlacRecorder/actions/workflows/preview.yml). Open a successful run for the implementation commit and download its platform artifact. These previews have no publisher certificate or macOS notarization. Each contains its portable app, launch instructions, license notices, inspection report where applicable, and application/JUCE source archive. GitHub requires sign-in to download workflow artifacts and retains them for 30 days.

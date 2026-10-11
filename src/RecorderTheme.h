@@ -2,6 +2,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "RecordingPresentation.h"
 
 namespace qfr::theme
 {
@@ -31,17 +32,29 @@ inline constexpr float actionSize = 22.0f;
 inline juce::Font body(float size = bodySize)
 {
    #if JUCE_WINDOWS
-    return juce::Font(juce::FontOptions("Segoe UI", size, juce::Font::plain));
+    return juce::Font(juce::FontOptions("Segoe UI", size, juce::Font::plain)
+                     .withFallbacks({ "Microsoft YaHei UI", "Microsoft YaHei" }));
+   #elif JUCE_MAC
+    return juce::Font(juce::FontOptions(size).withFallbacks({ "PingFang SC" }));
    #else
-    return juce::Font(juce::FontOptions(size));
+    return juce::Font(juce::FontOptions(size).withFallbacks({ "Noto Sans CJK SC", "WenQuanYi Micro Hei" }));
    #endif
 }
 
 inline juce::Font data(float size = secondarySize)
 {
     return juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), size,
-                                     juce::Font::plain));
+                                     juce::Font::plain).withFallbacks({ "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC" }));
 }
+
+class RecordingButton final : public juce::TextButton
+{
+public:
+    void setAction(RecordingAction selected) { action = selected; repaint(); }
+    RecordingAction getAction() const noexcept { return action; }
+private:
+    RecordingAction action = RecordingAction::record;
+};
 
 class LookAndFeel final : public juce::LookAndFeel_V4
 {
@@ -77,6 +90,7 @@ public:
     juce::Font getComboBoxFont(juce::ComboBox&) override { return body(); }
     juce::Font getPopupMenuFont() override { return body(); }
     juce::Font getAlertWindowMessageFont() override { return body(); }
+    juce::Font getAlertWindowTitleFont() override { return body(bodySize + 2.0f); }
     void drawComboBox(juce::Graphics& g, int width, int height, bool down,
                       int buttonX, int buttonY, int buttonWidth, int buttonHeight,
                       juce::ComboBox& box) override
@@ -92,13 +106,15 @@ public:
     void drawButtonText(juce::Graphics& g, juce::TextButton& button,
                         bool highlighted, bool down) override
     {
-        if (button.getComponentID() != "recordingAction")
+        const auto* actionButton = dynamic_cast<RecordingButton*>(&button);
+        if (actionButton == nullptr)
         {
             juce::LookAndFeel_V4::drawButtonText(g, button, highlighted, down);
             return;
         }
         const auto label = button.getButtonText();
-        const auto hasIcon = label == "Record" || label == "Stop";
+        const auto action = actionButton->getAction();
+        const auto hasIcon = action != RecordingAction::finalizing;
         const auto font = body(actionSize);
         const auto textWidth = juce::GlyphArrangement::getStringWidthInt(font, label);
         const int iconSize = 14, iconGap = 10;
@@ -106,9 +122,9 @@ public:
         const auto x = (button.getWidth() - groupWidth) / 2;
         if (hasIcon)
         {
-            g.setColour(button.isEnabled() ? (label == "Record" ? record : text) : muted);
+            g.setColour(button.isEnabled() ? (action == RecordingAction::record ? record : text) : muted);
             const auto y = static_cast<float>((button.getHeight() - iconSize) / 2);
-            if (label == "Record") g.fillEllipse(static_cast<float>(x), y, iconSize, iconSize);
+            if (action == RecordingAction::record) g.fillEllipse(static_cast<float>(x), y, iconSize, iconSize);
             else g.fillRect(static_cast<float>(x), y, static_cast<float>(iconSize), static_cast<float>(iconSize));
         }
         g.setFont(font);

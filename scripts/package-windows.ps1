@@ -42,6 +42,8 @@ New-Item -ItemType Directory -Path $package -Force | Out-Null
 & $Python (Join-Path $PSScriptRoot 'package-common.py') $package --juce-source $JuceSource
 if ($LASTEXITCODE -ne 0) { throw 'Source/notices packaging failed' }
 Copy-Item -LiteralPath $binary -Destination $package
+& $Python (Join-Path $PSScriptRoot 'verify-translations.py') (Join-Path $package 'QuickFlacRecorder.exe') --report (Join-Path $package 'localization-resources.txt')
+if ($LASTEXITCODE -ne 0) { throw 'Embedded localization resource inspection failed' }
 @("Windows x64 Release dependency inspection", "", $headers, "", $dependencies) | Set-Content -LiteralPath (Join-Path $package 'windows-dependencies.txt')
 Get-FileHash -LiteralPath $binary -Algorithm SHA256 | Format-List | Out-String | Set-Content -LiteralPath (Join-Path $package 'SHA256.txt')
 $archive = Join-Path $destinationPath 'QuickFlacRecorder-windows-x64.zip'

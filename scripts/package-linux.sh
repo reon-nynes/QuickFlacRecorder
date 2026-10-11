@@ -39,6 +39,7 @@ alsa=$(ldconfig -p | awk '/libasound.so.2 .*x86-64/ && !found {print $NF; found=
 "$work/linuxdeploy/squashfs-root/AppRun" --appdir "$appdir" --executable "$binary" \
     --desktop-file "$repo/packaging/QuickFlacRecorder.desktop" --icon-file "$repo/packaging/QuickFlacRecorder.svg" \
     --library "$alsa"
+python3 "$repo/scripts/verify-translations.py" "$appdir/usr/bin/QuickFlacRecorder" --report "$package/localization-resources.txt"
 notices="$appdir/usr/share/doc/QuickFlacRecorder"
 mkdir -p "$notices"
 cp "$package/LICENSE" "$package/NOTICE.md" "$package/LAUNCH.md" "$package/SOURCE.txt" "$notices/"

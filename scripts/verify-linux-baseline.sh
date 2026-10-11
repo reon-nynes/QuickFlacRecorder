@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
 archive=$(realpath "${1:?Provide the Linux preview tar.gz}")
 destination=$(dirname "$archive")
 report="$destination/linux-baseline.txt"
@@ -14,6 +15,7 @@ chmod +x "$image"
 (cd "$work" && "$image" --appimage-extract > /dev/null)
 appdir="$work/squashfs-root"
 binary="$appdir/usr/bin/QuickFlacRecorder"
+python3 "$repo/scripts/verify-translations.py" "$binary"
 file "$image" "$binary"
 file "$binary" | grep -q 'ELF 64-bit.*x86-64'
 [[ -f "$appdir/usr/share/doc/QuickFlacRecorder/LICENSE" ]] || { echo 'Missing packaged license'; exit 1; }

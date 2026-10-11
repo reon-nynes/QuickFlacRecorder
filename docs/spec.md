@@ -79,6 +79,8 @@ Deliver a working local Windows build, automated behavior checks, build/package 
 
 ## Implementation decisions
 
+- Issue #10 extends the normal recording flow to system-selected English and Simplified Chinese through embedded catalogs. Resolve current interface-language preferences once per launch, inject the immutable selection, preserve native data and control state independently of captions, and format structured successful session outcomes in presentation. [ADR 0003](adr/0003-system-interface-language-catalogs.md) and [the contributor procedure](localization.md) define the module contract. Error and recovery translation is the following slice.
+
 - Use JUCE 9.0.3 pinned through CMake for the native interface, audio input, and bundled FLAC writing. Adopt AGPLv3 for the project and replace the existing GPLv3 license during implementation. Follow the accepted architectural decisions titled "Use JUCE under AGPLv3" and "Package a portable download for each desktop platform."
 - Build a dark native window with a 600 by 400 logical-pixel content area. Arrange compact target-folder and recording-prefix rows above audio driver, input device, mono/stereo, and explicit channel selectors. Center the 32-pixel monospaced elapsed timer in its dedicated 60-pixel-high area. Put the live level meter beside the 140 by 64 Record/Stop button. Include the filename preview, negotiated input stream rate, fixed 16-bit output, and a reserved two-line status area. Use 15-pixel body/control/popup/status text, 14-pixel labels, and 13-pixel secondary text. Keep the canonical values and runtime theme synchronized with DESIGN.md.
 - Give Record a dot and restrained red emphasis, Stop a square, and both explicit labels. Hover, pressed, keyboard focus, disabled, recording, and finalizing states must remain distinct and readable. Finishing... retains the action's size and disables another take until finalization completes. Long editable paths and full-value tooltips must remain usable; recording-time locks must not move controls.
@@ -105,6 +107,8 @@ Deliver a working local Windows build, automated behavior checks, build/package 
 - Prepare source, documentation, and a working Windows build locally first. Preserve the accepted domain documents. Then push a `codex/` implementation branch and open a draft pull request in the existing repository. Attach the created pull request to the Codex chat. Publish a public release only after the user reviews the working build.
 
 ## Testing decisions
+
+- Issue #10 adds focused public boundaries for translation/resolution, injectable OS-language adapter inputs, structured status presentation, and caption-independent native controls. These checks extend the original session boundary for the new localization requirements. Local Windows render/input evidence does not establish macOS/Linux runtime acceptance.
 
 - The user confirmed one main automated test boundary on 2026-10-11: exercise a recording session with known input audio and a real temporary target folder. Observe filenames, resulting FLAC contents, session outcomes, and file finalization. Test externally visible behavior rather than private methods, internal queues, or how modules call one another.
 - There is no existing application test suite or established test boundary in the repository. The proposed recording-session boundary supplies the highest practical point for the accepted filename, capture, finalization, and failure checks. Prefer exercising filename behavior through the session over creating a second filename-specific test API.
