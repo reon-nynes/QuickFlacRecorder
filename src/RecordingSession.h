@@ -68,6 +68,7 @@ public:
     // Call while idle as well, for selected-channel metering.
     void processInput(const float* const* inputs, int inputChannels, int frames) noexcept;
     void inputLost() noexcept; // Safe from an input-device callback; preserves queued captured audio.
+    void inputDiscontinuity() noexcept; // Report driver overruns/missing samples without claiming input loss.
 
 private:
     struct Impl;

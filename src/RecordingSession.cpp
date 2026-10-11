@@ -214,7 +214,7 @@ namespace qfr
 static_assert(std::atomic<uint64_t>::is_always_lock_free && std::atomic<float>::is_always_lock_free);
 struct RecordingSession::Impl
 {
-    enum class Failure { none, input, overflow, writer, promotion };
+    enum class Failure { none, input, discontinuity, overflow, writer, promotion };
     explicit Impl(Options optionsIn) : options(std::move(optionsIn)) {}
     Options options;
     Configuration config;
@@ -309,6 +309,7 @@ struct RecordingSession::Impl
             if (!complete)
             {
                 auto interruption = reason == Failure::input ? juce::String("Input device was lost. ")
+                                   : reason == Failure::discontinuity ? juce::String("Input audio discontinuity detected. The driver reported missing samples. ")
                                    : reason == Failure::overflow ? juce::String("The capture buffer overflowed. ") : juce::String();
                 view.message = interruption
                              + (!finalizationValid || reason == Failure::writer ? "Writing or finalizing the FLAC failed. "
@@ -319,6 +320,7 @@ struct RecordingSession::Impl
             {
                 case Failure::none: view.message = "Saved " + final.getFileName(); break;
                 case Failure::input: view.message = "Input device was lost. Captured audio was finalized as " + final.getFileName(); break;
+                case Failure::discontinuity: view.message = "Input audio discontinuity detected. The driver reported missing samples. Captured audio was finalized as " + final.getFileName(); break;
                 case Failure::overflow: view.message = "Recording stopped because the capture buffer overflowed. Captured audio was finalized as " + final.getFileName(); break;
                 case Failure::writer: view.message = "Writing or finalizing the FLAC failed. The incomplete recording remains at " + partial.getFullPathName(); break;
                 case Failure::promotion: view.message = "The final recording filename could not be reserved without replacement. The incomplete recording remains at " + partial.getFullPathName(); break;
@@ -505,6 +507,12 @@ void RecordingSession::inputLost() noexcept
     // Device error notifications can race with a requested stop just like an audio block.
     impl->inFlight.fetch_add(1);
     if (impl->accepting.load()) impl->fail(Impl::Failure::input);
+    impl->inFlight.fetch_sub(1);
+}
+void RecordingSession::inputDiscontinuity() noexcept
+{
+    impl->inFlight.fetch_add(1);
+    if (impl->accepting.load()) impl->fail(Impl::Failure::discontinuity);
     impl->inFlight.fetch_sub(1);
 }
 }

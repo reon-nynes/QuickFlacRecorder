@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "InputController.h"
+#include <cmath>
 
 namespace qfr
 {
@@ -80,10 +81,12 @@ void InputController::close()
     if (device)
     {
         device->stop();
+        callbackDevice.store(nullptr);
         device->close();
         device.reset();
     }
     started.store(false);
+    lastXRunCount.store(-1);
     streamRate.store(0);
     channelNames.clear();
 }
@@ -113,9 +116,11 @@ juce::Result InputController::open(const juce::String& driverName, const juce::S
 
     juce::BigInteger inputs;
     inputs.setRange(0, channelNames.size(), true);
-    // Zero asks JUCE for the current/default stream rate. All device input channels
-    // stay in their native order; no application resampling or processing is added.
-    const auto error = device->open(inputs, {}, 0.0, device->getDefaultBufferSize());
+    // ASIO exposes the hardware's existing rate before open; zero would instead
+    // choose its first supported rate. Other drivers can request their default with zero.
+    rateBeforeOpen = device->getCurrentSampleRate();
+    const auto requestedRate = std::isfinite(rateBeforeOpen) && rateBeforeOpen > 0 ? rateBeforeOpen : 0.0;
+    const auto error = device->open(inputs, {}, requestedRate, device->getDefaultBufferSize());
     if (error.isNotEmpty())
     {
         close();
@@ -176,6 +181,16 @@ void InputController::audioDeviceIOCallbackWithContext(const float* const* input
     for (int channel = 0; channel < outputChannels; ++channel)
         if (outputs[channel] != nullptr)
             juce::FloatVectorOperations::clear(outputs[channel], frames);
+    if (auto* openedDevice = callbackDevice.load())
+    {
+        const auto count = openedDevice->getXRunCount();
+        const auto previous = lastXRunCount.exchange(count);
+        // Update the baseline while idle too, so historical overruns cannot fail a
+        // later take. The session ignores idle notifications and rejects this block
+        // if a supported driver's count advances during capture. -1 is unsupported.
+        if (count >= 0 && previous >= 0 && count > previous)
+            session.inputDiscontinuity();
+    }
     session.processInput(inputs, inputChannels, frames);
 }
 
@@ -188,10 +203,13 @@ void InputController::audioDeviceAboutToStart(juce::AudioIODevice* openedDevice)
         session.inputLost(); // An unsolicited restart can change rate or lose samples.
     }
     streamRate.store(newRate);
+    callbackDevice.store(openedDevice);
+    lastXRunCount.store(openedDevice->getXRunCount());
 }
 
 void InputController::audioDeviceStopped()
 {
+    callbackDevice.store(nullptr);
     if (! intentionalStop.load())
     {
         deviceLost.store(true);

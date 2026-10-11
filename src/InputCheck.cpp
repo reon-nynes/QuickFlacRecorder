@@ -123,7 +123,9 @@ int main(int argc, char* argv[])
     if (configured.failed()) { print("ERROR: " + configured.getErrorMessage()); return 2; }
     print("driver=" + driver + " input=" + device + " left_channel=" + juce::String(left + 1)
           + " (" + channels[left] + ")" + (right >= 0 ? " right_channel=" + juce::String(right + 1) + " (" + channels[right] + ")" : ""));
-    print("opened_input_stream_rate=" + juce::String(input.sampleRate(), 0) + " bits=16 duration_requested=" + juce::String(seconds));
+    print("input_rate_before_open=" + juce::String(input.sampleRateBeforeOpen(), 0)
+          + " opened_input_stream_rate=" + juce::String(input.sampleRate(), 0)
+          + " bits=16 duration_requested=" + juce::String(seconds));
     const auto started = session.start();
     if (started.failed()) { print("ERROR: " + started.getErrorMessage()); return 2; }
     print("RECORDING: speak into the selected microphone now.");

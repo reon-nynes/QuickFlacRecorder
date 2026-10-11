@@ -228,6 +228,29 @@ void failedInputPreservesFinalizableAudioAndReportsIncompleteFinalization()
             && outcome.recordingFile.getFileName() == "take_03.partial.flac" && !folder.file.getChildFile("take_03.flac").exists(),
             "metadata validation failure after input loss cannot promote an invalid FLAC");
 }
+void driverDiscontinuityFailsTheTakeAndPreservesAcceptedAudio()
+{
+    Folder folder;
+    qfr::RecordingSession session;
+    require(session.configure(config(folder)).wasOk(), "configure driver-discontinuity recording");
+    session.inputDiscontinuity();
+    require(session.snapshot().state == qfr::RecordingSession::State::idle,
+            "historical idle driver discontinuities do not fail the next take");
+    require(session.start().wasOk(), "start driver-discontinuity recording");
+    std::array<float, 512> source; source.fill(.25f);
+    const float* inputs[] { source.data() };
+    session.processInput(inputs, 1, 512);
+    session.inputDiscontinuity();
+    session.processInput(inputs, 1, 512);
+    session.requestStop(); session.waitForStop();
+    const auto outcome = session.snapshot();
+    require(outcome.state == qfr::RecordingSession::State::failed && !outcome.incomplete
+            && outcome.message.contains("discontinuity") && outcome.message.contains("missing samples")
+            && !outcome.message.contains("Saved") && !outcome.message.contains("lost"),
+            "driver missing samples report a specific failed take with finalized captured audio");
+    require(decode(outcome.recordingFile)->lengthInSamples == 512,
+            "discontinuity drains accepted frames and rejects later potentially discontinuous audio");
+}
 void finalizationLocksAnotherTakeAndPromotionDoesNotReplace()
 {
     Folder folder;
@@ -383,6 +406,8 @@ int main()
         std::cout << "PASS selected stereo and idle/active meters\n";
         failedInputPreservesFinalizableAudioAndReportsIncompleteFinalization();
         std::cout << "PASS input loss and incomplete finalization\n";
+        driverDiscontinuityFailsTheTakeAndPreservesAcceptedAudio();
+        std::cout << "PASS driver discontinuity and preserved audio\n";
         finalizationLocksAnotherTakeAndPromotionDoesNotReplace();
         std::cout << "PASS finalization locks and promotion conflict\n";
         overflowAndWriterFailuresStopWithoutClaimingSuccess();
