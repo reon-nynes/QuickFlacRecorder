@@ -1,0 +1,7 @@
+/build*/
+/dist/
+/externals/
+/.vs/
+/.idea/
+*.user
+*.log
