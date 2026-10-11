@@ -17,8 +17,18 @@ inline const juce::Colour warning { 0xffe5b864 };
 inline const juce::Colour danger { 0xffff8681 };
 inline constexpr float controlRadius = 4.0f;
 inline constexpr int margin = 14;
+inline constexpr int contentWidth = 600;
+inline constexpr int contentHeight = 400;
+inline constexpr int timerAreaHeight = 60;
+inline constexpr int recordWidth = 140;
+inline constexpr int recordHeight = 64;
+inline constexpr float bodySize = 15.0f;
+inline constexpr float labelSize = 14.0f;
+inline constexpr float secondarySize = 13.0f;
+inline constexpr float timerSize = 32.0f;
+inline constexpr float actionSize = 22.0f;
 
-inline juce::Font body(float size = 13.0f)
+inline juce::Font body(float size = bodySize)
 {
    #if JUCE_WINDOWS
     return juce::Font(juce::FontOptions("Segoe UI", size, juce::Font::plain));
@@ -27,7 +37,7 @@ inline juce::Font body(float size = 13.0f)
    #endif
 }
 
-inline juce::Font data(float size = 12.0f)
+inline juce::Font data(float size = secondarySize)
 {
     return juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), size,
                                      juce::Font::plain));
@@ -62,17 +72,57 @@ public:
 
     juce::Font getTextButtonFont(juce::TextButton&, int height) override
     {
-        return body(height > 40 ? 22.0f : 13.0f);
+        return body(height > 40 ? actionSize : bodySize);
     }
     juce::Font getComboBoxFont(juce::ComboBox&) override { return body(); }
     juce::Font getPopupMenuFont() override { return body(); }
+    juce::Font getAlertWindowMessageFont() override { return body(); }
+    void drawComboBox(juce::Graphics& g, int width, int height, bool down,
+                      int buttonX, int buttonY, int buttonWidth, int buttonHeight,
+                      juce::ComboBox& box) override
+    {
+        juce::LookAndFeel_V4::drawComboBox(g, width, height, down,
+                                          buttonX, buttonY, buttonWidth, buttonHeight, box);
+        if (box.hasKeyboardFocus(true))
+        {
+            g.setColour(meter);
+            g.drawRoundedRectangle(box.getLocalBounds().toFloat().reduced(1.0f), controlRadius, 2.0f);
+        }
+    }
+    void drawButtonText(juce::Graphics& g, juce::TextButton& button,
+                        bool highlighted, bool down) override
+    {
+        if (button.getComponentID() != "recordingAction")
+        {
+            juce::LookAndFeel_V4::drawButtonText(g, button, highlighted, down);
+            return;
+        }
+        const auto label = button.getButtonText();
+        const auto hasIcon = label == "Record" || label == "Stop";
+        const auto font = body(actionSize);
+        const auto textWidth = juce::GlyphArrangement::getStringWidthInt(font, label);
+        const int iconSize = 14, iconGap = 10;
+        const auto groupWidth = textWidth + (hasIcon ? iconSize + iconGap : 0);
+        const auto x = (button.getWidth() - groupWidth) / 2;
+        if (hasIcon)
+        {
+            g.setColour(button.isEnabled() ? (label == "Record" ? record : text) : muted);
+            const auto y = static_cast<float>((button.getHeight() - iconSize) / 2);
+            if (label == "Record") g.fillEllipse(static_cast<float>(x), y, iconSize, iconSize);
+            else g.fillRect(static_cast<float>(x), y, static_cast<float>(iconSize), static_cast<float>(iconSize));
+        }
+        g.setFont(font);
+        g.setColour(button.isEnabled() ? text : muted);
+        g.drawText(label, x + (hasIcon ? iconSize + iconGap : 0), 0, textWidth, button.getHeight(),
+                   juce::Justification::centred);
+    }
     void drawButtonBackground(juce::Graphics& g, juce::Button& button, const juce::Colour& colour,
                               bool highlighted, bool down) override
     {
         auto bounds = button.getLocalBounds().toFloat().reduced(0.5f);
         auto fill = colour;
-        if (highlighted) fill = fill.brighter(0.12f);
         if (down) fill = fill.darker(0.12f);
+        else if (highlighted) fill = fill.brighter(0.12f);
         if (! button.isEnabled()) fill = fill.withAlpha(0.35f);
         g.setColour(fill);
         g.fillRoundedRectangle(bounds, controlRadius);

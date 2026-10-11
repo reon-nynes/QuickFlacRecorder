@@ -58,18 +58,18 @@ void LevelMeter::update(const RecordingSession::Levels& levels)
 void LevelMeter::paint(juce::Graphics& g)
 {
     const auto now = juce::Time::getMillisecondCounterHiRes();
-    const int barHeight = channels == 1 ? 18 : 12;
+    const int barHeight = channels == 1 ? 22 : 18;
     const int top = channels == 1 ? 8 : 2;
-    const int barX = 16;
-    const int barWidth = getWidth() - 86;
-    g.setFont(theme::data(10.0f));
+    const int barX = 18;
+    const int barWidth = getWidth() - 114;
+    g.setFont(theme::data());
     for (int channel = 0; channel < channels; ++channel)
     {
-        const auto y = top + channel * 20;
+        const auto y = top + channel * 24;
         const auto bounds = juce::Rectangle<float>(static_cast<float>(barX), static_cast<float>(y),
                                                    static_cast<float>(barWidth), static_cast<float>(barHeight));
         g.setColour(theme::muted);
-        g.drawText(channels == 1 ? "M" : (channel == 0 ? "L" : "R"), 0, y, 12, barHeight,
+        g.drawText(channels == 1 ? "M" : (channel == 0 ? "L" : "R"), 0, y, 14, barHeight,
                    juce::Justification::centred);
         g.setColour(theme::surface);
         g.fillRoundedRectangle(bounds, 2.0f);
@@ -83,17 +83,17 @@ void LevelMeter::paint(juce::Graphics& g)
         }
         g.setColour(theme::text);
         const auto value = db[static_cast<size_t>(channel)] <= -60 ? "-inf" : juce::String(db[static_cast<size_t>(channel)], 1);
-        g.drawText(value, barX + barWidth + 4, y, 38, barHeight, juce::Justification::centredRight);
+        g.drawText(value, barX + barWidth + 4, y, 52, barHeight, juce::Justification::centredRight);
         if (now < clipUntil[static_cast<size_t>(channel)])
         {
             g.setColour(theme::danger);
-            g.drawText("CLIP", getWidth() - 26, y, 26, barHeight, juce::Justification::centredRight);
+            g.drawText("CLIP", getWidth() - 34, y, 34, barHeight, juce::Justification::centredRight);
         }
     }
     g.setColour(theme::muted);
-    g.drawText("-60", barX, 42, 25, 12, juce::Justification::left);
-    g.drawText("-30", barX + barWidth / 2 - 12, 42, 25, 12, juce::Justification::centred);
-    g.drawText("0 dBFS", barX + barWidth - 44, 42, 44, 12, juce::Justification::right);
+    g.drawText("-60", barX, 48, 28, 16, juce::Justification::left);
+    g.drawText("-30", barX + barWidth / 2 - 14, 48, 28, 16, juce::Justification::centred);
+    g.drawText("0 dBFS", barX + barWidth - 50, 48, 50, 16, juce::Justification::right);
 }
 
 RecorderComponent::RecorderComponent(juce::PropertiesFile& settings) : preferences(settings)
@@ -104,7 +104,7 @@ RecorderComponent::RecorderComponent(juce::PropertiesFile& settings) : preferenc
     const auto label = [this](juce::Label& item, const juce::String& text, juce::Component* control)
     {
         item.setText(text, juce::dontSendNotification);
-        item.setFont(theme::body(12.0f));
+        item.setFont(theme::body(theme::labelSize));
         item.setColour(juce::Label::textColourId, theme::muted);
         addAndMakeVisible(item);
         if (control) control->setTitle(text);
@@ -133,14 +133,17 @@ RecorderComponent::RecorderComponent(juce::PropertiesFile& settings) : preferenc
     for (auto* item : { &filename, &format, &elapsed, &status })
     {
         addAndMakeVisible(item);
-        item->setFont(theme::body(12.0f));
+        item->setFont(theme::body());
         item->setMinimumHorizontalScale(1.0f);
     }
-    filename.setFont(theme::data(12.0f));
+    recordButton.setComponentID("recordingAction");
+    filename.setFont(theme::data());
     filename.setTitle("Next filename");
     format.setColour(juce::Label::textColourId, theme::muted);
-    elapsed.setFont(theme::data(13.0f));
-    elapsed.setJustificationType(juce::Justification::centredRight);
+    format.setFont(theme::body(theme::secondarySize));
+    elapsed.setFont(theme::data(theme::timerSize));
+    elapsed.setJustificationType(juce::Justification::centred);
+    elapsed.setTitle("Elapsed recording time");
     status.setJustificationType(juce::Justification::topLeft);
     status.setTitle("Recording status");
     addAndMakeVisible(meter);
@@ -181,7 +184,7 @@ RecorderComponent::RecorderComponent(juce::PropertiesFile& settings) : preferenc
         if (! input.isAvailable()) inputError = input.pollError();
         updateStatus();
     };
-    setSize(520, 300);
+    setSize(theme::contentWidth, theme::contentHeight);
     requestMicrophonePermission();
     startTimerHz(25);
 }
@@ -333,7 +336,9 @@ void RecorderComponent::updateStatus()
     recordButton.setButtonText(snapshot.state == RecordingSession::State::recording ? "Stop"
         : (snapshot.state == RecordingSession::State::finalizing ? "Finishing..." : "Record"));
     recordButton.setColour(juce::TextButton::buttonColourId,
-        snapshot.state == RecordingSession::State::recording ? theme::record : theme::surface);
+        snapshot.state == RecordingSession::State::recording ? theme::record.interpolatedWith(theme::surface, 0.65f)
+        : snapshot.state == RecordingSession::State::finalizing ? theme::surface
+        : theme::record.interpolatedWith(theme::surface, 0.85f));
     recordButton.setEnabled(snapshot.state == RecordingSession::State::recording
         || (! locked && input.isAvailable() && inputError.isEmpty() && configurationError.isEmpty()));
     leftLabel.setText(mode.getSelectedId() == 2 ? "Left input" : "Mono input", juce::dontSendNotification);
@@ -346,6 +351,11 @@ void RecorderComponent::updateStatus()
         + "  /  16-bit FLAC", juce::dontSendNotification);
     filename.setText("Next  " + snapshot.nextFile.getFileName(), juce::dontSendNotification);
     filename.setTooltip(snapshot.nextFile.getFullPathName());
+    audioDriver.setTooltip(audioDriver.getText() + "\nShared audio is the normal system path. Exclusive or ASIO requires an available device.");
+    targetFolder.setTooltip(targetFolder.getText() + "\nChoose an existing writable target folder.");
+    recordingPrefix.setTooltip(recordingPrefix.getText() + "\nThe app appends _01.flac, _02.flac, and later counters.");
+    leftChannel.setTooltip(leftChannel.getText());
+    rightChannel.setTooltip(rightChannel.getText());
 
     auto message = snapshot.message;
     auto colour = theme::muted;
@@ -448,29 +458,29 @@ void RecorderComponent::paint(juce::Graphics& g) { g.fillAll(theme::background);
 
 void RecorderComponent::resized()
 {
-    folderLabel.setBounds(10, 14, 88, 28);
-    targetFolder.setBounds(98, 14, 334, 28);
-    browse.setBounds(438, 14, 68, 28);
-    prefixLabel.setBounds(10, 48, 88, 28);
-    recordingPrefix.setBounds(98, 48, 408, 28);
-    driverLabel.setBounds(10, 82, 142, 16);
-    deviceLabel.setBounds(168, 82, 250, 16);
-    audioDriver.setBounds(14, 100, 146, 26);
-    inputDevice.setBounds(172, 100, 270, 26);
-    refreshInputs.setBounds(446, 100, 60, 26);
-    modeLabel.setBounds(10, 130, 94, 16);
-    leftLabel.setBounds(110, 130, 190, 16);
-    rightLabel.setBounds(314, 130, 190, 16);
-    mode.setBounds(14, 146, 92, 26);
-    leftChannel.setBounds(114, 146, mode.getSelectedId() == 2 ? 192 : 392, 26);
-    rightChannel.setBounds(318, 146, 188, 26);
+    folderLabel.setBounds(10, 14, 98, 28);
+    targetFolder.setBounds(112, 14, 392, 28);
+    browse.setBounds(510, 14, 76, 28);
+    prefixLabel.setBounds(10, 48, 98, 28);
+    recordingPrefix.setBounds(112, 48, 474, 28);
+    driverLabel.setBounds(10, 80, 176, 18);
+    deviceLabel.setBounds(196, 80, 300, 18);
+    audioDriver.setBounds(14, 98, 174, 28);
+    inputDevice.setBounds(200, 98, 304, 28);
+    refreshInputs.setBounds(510, 98, 76, 28);
+    modeLabel.setBounds(10, 128, 100, 18);
+    leftLabel.setBounds(122, 128, 220, 18);
+    rightLabel.setBounds(358, 128, 226, 18);
+    mode.setBounds(14, 146, 100, 28);
+    leftChannel.setBounds(126, 146, mode.getSelectedId() == 2 ? 224 : 460, 28);
+    rightChannel.setBounds(362, 146, 224, 28);
     rightLabel.setVisible(mode.getSelectedId() == 2);
     rightChannel.setVisible(mode.getSelectedId() == 2);
-    meter.setBounds(14, 179, 348, 56);
-    recordButton.setBounds(378, 179, 128, 53);
-    format.setBounds(10, 233, 265, 18);
-    elapsed.setBounds(372, 233, 138, 18);
-    filename.setBounds(10, 251, 500, 17);
-    status.setBounds(10, 270, 500, 28);
+    elapsed.setBounds(theme::margin, 178, getWidth() - 2 * theme::margin, theme::timerAreaHeight);
+    meter.setBounds(14, 244, 416, 64);
+    recordButton.setBounds(446, 244, theme::recordWidth, theme::recordHeight);
+    format.setBounds(10, 310, 580, 18);
+    filename.setBounds(10, 330, 580, 18);
+    status.setBounds(10, 350, 580, 36);
 }
 }

@@ -51,7 +51,7 @@ Rounds 1, 2, and 3 are accepted. The decision frontier is empty. The user has ac
 | Framework | JUCE 9.0.3, CMake, AGPLv3 route | Settled |
 | Audio backends and rate | WASAPI shared/exclusive and ASIO; CoreAudio; ALSA/optional JACK; preserve opened stream rate | Settled |
 | Preferences | Remember folder, input/channel selections and window position; new prefix each launch | Settled |
-| Interface | Compact dark window about 520 by 300 logical pixels; explicit channel controls and peak meters | Settled |
+| Interface | Dark 600 by 400 logical-pixel content area; centered 32-pixel timer, 140 by 64 Record/Stop action, larger type, explicit channels and peak meters | Settled, updated by #8 |
 | Recording reliability | Stop on failures, preserve finalizable audio, .partial.flac until finalized, no silent overwrite | Settled |
 | Validation and release | Focused automated checks and three-platform CI; Windows hardware check; unsigned previews; public release after review | Settled |
 
@@ -73,7 +73,7 @@ The user accepted items 6-12 with "Yes to all".
 7. Remember the target folder, audio selections, channel selection, and window position in the user's normal settings location. Default the first launch to Downloads. Generate a new date/time prefix on every launch. If a saved input is unavailable, show that state and require selection before recording.
 8. Allocate one more than the highest counter for the exact prefix in the selected target folder. Pad to at least two digits and continue to 100 after 99. Do not reuse gaps or overwrite files. Show the next full filename as a preview; reject unsafe filename characters.
 9. Stop on input loss or a recording/write failure, preserve captured audio that can be finalized, and show an explicit error. Do not claim a failed or incomplete file saved successfully. While recording, write to a .partial.flac name, then promote it to the final .flac name after successful finalization. Preserve incomplete files for inspection after a crash; automated crash repair is outside v1.
-10. Use a compact dark native window, approximately 520 by 300 logical pixels. Put folder and prefix rows above driver/device/channel controls, with the live meter beside a large Record/Stop button below. Show the input rate, fixed 16-bit output, and recording elapsed time. No waveform or separate settings window in v1.
+10. Use a dark native window with a 600 by 400 logical-pixel content area. Put folder and prefix rows above driver/device/channel controls, a centered 32-pixel monospaced timer in a dedicated 60-pixel-high area, and the live meter beside a 140 by 64 Record/Stop button below. Show the input rate, fixed 16-bit output, filename preview, and two-line status in the footer. Use 15-pixel body text, 14-pixel labels, and 13-pixel secondary text. Issue #8 replaces the original compact dimensions and typography with this approved baseline. No waveform or separate settings window in v1.
 11. Lock folder, prefix, and audio selections during recording. Make Stop complete finalization before another take can start. Closing during recording offers Continue recording or Stop and quit. Space toggles recording when a text field or selector does not have focus.
 12. Target Windows 10/11 x64, macOS 12+ with a universal Intel/Apple Silicon app, and Linux x64 with Ubuntu 22.04+ as the initial tested baseline. Defer other architectures and a broader Linux compatibility promise until tested.
 
@@ -90,6 +90,8 @@ The user accepted items 13-19 with "Yes to all".
 19. Prepare local source, documentation, and a working Windows build first, then push an implementation branch and open a draft pull request in the existing repository. Produce unsigned preview artifacts initially and document platform launch requirements. Publish a public release only after the user reviews the build. Signing and macOS notarization require a later credential/setup step.
 
 ## Consolidated product behavior
+
+The interface update approved on 2026-10-11 is recorded in [issue #8](https://github.com/reon-nynes/QuickFlacRecorder/issues/8). [DESIGN.md](../DESIGN.md) and the runtime theme own the implemented layout and typography. Record has a dot and restrained red emphasis; Stop has a square. Both retain explicit labels and stable size through hover, pressed, focus, disabled, recording, and finalizing states. Recording-time locks preserve control positions, and long paths and values remain usable through editing and full-value tooltips.
 
 The app opens a compact dark window with target-folder and recording-prefix fields, audio driver and input-device selectors, a mono/stereo choice and explicit channel selectors, a filename preview, and a peak meter beside the Record button. The status area shows the negotiated sample rate and 16-bit FLAC, recording elapsed time, and actionable folder, device, permission, or write errors. The app remembers the folder, audio selections, and window position in the normal user settings location. Each launch supplies a new editable local date/time prefix.
 

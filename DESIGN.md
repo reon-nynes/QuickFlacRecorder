@@ -15,10 +15,22 @@ colors:
 typography:
   sans:
     fontFamily: "Segoe UI, system-ui, sans-serif"
+    fontSize: "15px"
+  label:
+    fontFamily: "Segoe UI, system-ui, sans-serif"
+    fontSize: "14px"
+  secondary:
+    fontFamily: "Segoe UI, system-ui, sans-serif"
     fontSize: "13px"
   mono:
     fontFamily: "Consolas, Menlo, DejaVu Sans Mono, monospace"
-    fontSize: "12px"
+    fontSize: "13px"
+  timer:
+    fontFamily: "Consolas, Menlo, DejaVu Sans Mono, monospace"
+    fontSize: "32px"
+  action:
+    fontFamily: "Segoe UI, system-ui, sans-serif"
+    fontSize: "22px"
 rounded:
   DEFAULT: "4px"
 spacing:
@@ -43,17 +55,21 @@ Runtime tokens in [src/RecorderTheme.h](src/RecorderTheme.h) are canonical for t
 
 ## Colors
 
-`background` is the window body; `surface` is the field, selector, idle action, and meter track. `border` separates controls. `text` holds entered values and primary labels; `muted` holds field labels, format metadata, and meter scale. `meter` marks incoming audio and successful completion. `record` marks the active Stop button; `warning` marks peaks above -6 dBFS and incomplete recordings; `danger` marks clipping and errors. All statuses also have text. The teal focus outline appears on enabled fields and actions.
+`background` is the window body; `surface` is the field, selector, finalizing action, and meter track. `border` separates controls. `text` holds entered values and primary labels; `muted` holds field labels, format metadata, and meter scale. `meter` marks incoming audio and successful completion. `record` supplies the idle Record dot and restrained action emphasis. Record mixes 15% record with 85% surface; active Stop mixes 35% record with 65% surface and has a white square. `warning` marks peaks above -6 dBFS and incomplete recordings; `danger` marks clipping and errors. All statuses also have text. The teal focus outline appears on enabled fields and actions.
 
 The header maps each `colors.*` entry to the identically named `qfr::theme::*` constant. No alternate light theme is part of v1.
 
 ## Typography
 
-`theme::body()` uses Segoe UI on Windows and the platform system sans elsewhere. Fields and controls use 13 logical pixels. Field labels and status use 12 pixels; Record/Stop uses 22 pixels. `theme::data()` uses JUCE's platform monospaced font for filenames, elapsed time, and meter numbers, with system font fallback. Paths remain editable in full and full filenames/statuses have tooltips when the compact display truncates them.
+`theme::body()` uses Segoe UI on Windows and the platform system sans elsewhere. Fields, selectors, selector popups, secondary buttons, and status use 15 logical pixels. Field labels use 14 pixels; format information, filenames, and meter numbers use 13 pixels. Record/Stop and Finishing... use 22 pixels. `theme::data()` uses JUCE's platform monospaced font for filenames, elapsed time, and meter numbers, with system font fallback. The elapsed timer uses 32 pixels and displays HH:MM:SS with stable-width digits. Its fixed area remains centered across seconds, minutes, and hours; labels never shrink the timer to fit.
+
+The frontmatter maps sans, label, secondary, mono, timer, and action to `bodySize`, `labelSize`, `secondarySize`, `secondarySize`, `timerSize`, and `actionSize` in `RecorderTheme.h`. Native controls consume these through the shared LookAndFeel or `body`/`data` helpers. Paths remain editable in full. Folder, prefix, selected input/channel, filename, and status tooltips expose full values when the display truncates them.
 
 ## Layout
 
-The content is 520 by 300 logical pixels, plus the native title bar. A 14-pixel outer margin bounds the controls. Two 28-pixel rows hold the target folder and recording prefix. Audio driver and input device share the next row. Mono/stereo and explicit left/right channels share the row below. The selected channel meter sits left of the 128 by 53-pixel Record/Stop action. Format and elapsed time, filename preview, and a two-line status fill the final rows.
+The content is 600 by 400 logical pixels, plus the native title bar. A 14-pixel outer margin bounds the controls. Two 28-pixel rows hold the target folder and recording prefix. Audio driver and input device share the next row with separate 18-pixel labels and 28-pixel selectors. Mono/stereo and explicit left/right channels share the row below. A dedicated 60-pixel-high timer area spans the content between the margins at y=178 and centers elapsed time horizontally and vertically. The selected channel meter sits left of the 140 by 64-pixel Record/Stop action at y=244. Format and filename each have an 18-pixel row, at y=310 and y=330. Status has a reserved 36-pixel area at y=350 for two lines of 15-pixel text. Label bounds include JUCE's four-pixel horizontal inset so text aligns with the controls.
+
+`contentWidth`, `contentHeight`, `timerAreaHeight`, `recordWidth`, `recordHeight`, and `margin` in the runtime theme implement these values. Issue #8 approves this larger layout and typography in place of the original compact design. The implemented values retain the proposed baseline; the footer allocation and compact setup rows make room for it without increasing the window.
 
 Mono uses the full channel selection width; stereo reveals separate ordered left and right selectors. Controls keep their positions during recording, finalization, success, and error. The native window is fixed size and remembers its position within available displays.
 
@@ -76,7 +92,9 @@ Controls use the shared four-pixel radius. Meter tracks use two pixels. Standard
 
 JUCE owns selector semantics, keyboard selection, and popup placement/scrolling; the shared LookAndFeel owns colors and fonts. The native folder chooser owns directory navigation. Values are preserved after validation failures. The session owns filename and recording validation; native device integration adds actionable input/permission errors.
 
-Buttons retain size when disabled or busy. `Finishing...` and locked controls expose finalization. The close dialog initially focuses Continue recording; Return and Escape keep recording. Stop and quit waits for finalization. Space toggles capture only outside text fields, selectors, and modal menus/dialogs.
+The primary action is a native JUCE TextButton named `recordingAction`, with its icon and centered text group drawn by the shared LookAndFeel. Record has a 14-pixel dot; Stop has a 14-pixel square; the icon-to-label gap is 10 pixels. Finishing... uses the same 140 by 64 area, no capture icon, muted text, a dimmed surface, and disabled semantics. Disabled Record uses a muted dot and label. Hover brightens the fill by 12%; pressed darkens it by 12%; keyboard focus adds a two-pixel teal outline. These states preserve text labels and never change geometry.
+
+`Finishing...` and locked controls expose finalization. The close dialog initially focuses Continue recording; Return and Escape keep recording. Stop and quit waits for finalization. Space toggles capture only outside text fields, selectors, and modal menus/dialogs.
 
 The meter polls the session at 25 Hz, displays selected-channel dBFS peaks, decays the displayed peak, and holds each clipping indicator for 1.2 seconds. Meter smoothing changes display only. There is no gain or other sound processing. Color has parallel channel labels, numeric peaks, and CLIP text. Native controls supply accessible names; status and meter descriptions expose their current values.
 
