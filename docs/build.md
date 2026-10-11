@@ -50,12 +50,14 @@ The CI host is `ubuntu-24.04`. The build runs inside `ubuntu:22.04` to retain th
 sudo apt-get update
 sudo apt-get install build-essential cmake ninja-build git ca-certificates curl python3 \
   pkg-config libasound2-dev libjack-jackd2-dev libfreetype6-dev libfontconfig1-dev \
-  libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libgl1-mesa-dev xvfb xauth file
+  libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libxi-dev libgl1-mesa-dev xvfb xauth file
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 cmake --build build --target QuickFlacRecorder RecorderSessionTests --parallel 2
 xvfb-run -a ctest --test-dir build --output-on-failure --no-tests=error
 bash scripts/package-linux.sh build
 ```
+
+JUCE 9.0.3 enables XInput by default. Ubuntu's [`libxi-dev` package](https://packages.ubuntu.com/jammy/amd64/libxi-dev/filelist) supplies its required `X11/extensions/XInput2.h` header. The fresh runtime baseline also installs [`libxi6`](https://packages.ubuntu.com/jammy/amd64/libxi6/filelist) so JUCE can load `libXi.so.6` and exercise that input path.
 
 Packaging uses versioned linuxdeploy and appimagetool assets with checked SHA-256 hashes. It obtains the AppImage runtime through an immutable GitHub release asset ID and verifies its hash. `GH_TOKEN` is optional and raises the GitHub API rate limit; Actions supplies its read-only workflow token. The script does not use the appimagetool default that fetches the latest runtime.
 

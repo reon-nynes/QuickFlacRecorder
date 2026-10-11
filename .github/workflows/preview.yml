@@ -69,7 +69,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends build-essential cmake ninja-build git ca-certificates curl python3 \
             pkg-config libasound2-dev libjack-jackd2-dev libfreetype6-dev libfontconfig1-dev \
-            libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libgl1-mesa-dev xvfb xauth file
+            libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libxi-dev libgl1-mesa-dev xvfb xauth file
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Configure Linux x64
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
@@ -101,7 +101,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates python3 binutils file xvfb xauth \
-            libasound2 libfontconfig1 libfreetype6 libx11-6 libxext6 libxinerama1 libxrandr2 libxcursor1 libgl1
+            libasound2 libfontconfig1 libfreetype6 libx11-6 libxext6 libxinerama1 libxrandr2 libxcursor1 libxi6 libgl1
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
