@@ -32,7 +32,11 @@ foreach ($dependency in $imports) {
         throw "Non-system DLL import must be resolved before packaging: $dependency"
     }
 }
-$destinationPath = [System.IO.Path]::GetFullPath((Join-Path $repo $Destination))
+$destinationPath = if ([System.IO.Path]::IsPathRooted($Destination)) {
+    [System.IO.Path]::GetFullPath($Destination)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $repo $Destination))
+}
 $package = Join-Path $destinationPath 'QuickFlacRecorder-windows-x64'
 New-Item -ItemType Directory -Path $package -Force | Out-Null
 & $Python (Join-Path $PSScriptRoot 'package-common.py') $package --juce-source $JuceSource
