@@ -1,0 +1,82 @@
+# Build and package
+
+Use CMake 3.22 or later, a C++20 compiler, and Git. The project fetches JUCE 9.0.3 during configuration. A first configure needs network access. To use a local checkout or the JUCE copy in a preview's source archive, add `-DFETCHCONTENT_SOURCE_DIR_JUCE=<absolute path to JUCE>` to the configure command. Preserve the pinned version.
+
+All platforms build the `QuickFlacRecorder` GUI and `RecorderSessionTests` console target. Run `ctest` with `--no-tests=error` so a missing test suite cannot appear to pass. The tests exercise the agreed recording-session boundary with controlled audio and a real temporary target folder. They do not establish real microphone or native UI behavior.
+
+## Windows x64
+
+Install Visual Studio 2022 or its Build Tools with the Desktop development with C++ workload, the Windows SDK, CMake, and Python 3. The CMake configuration selects the static MSVC runtime for the application, tests, and JUCE build. There is no separate FLAC runtime installation.
+
+From the repository in PowerShell:
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+cmake --build build --config Release --target QuickFlacRecorder RecorderSessionTests --parallel 2
+ctest --test-dir build -C Release --output-on-failure --no-tests=error
+& .\build\QuickFlacRecorder_artefacts\Release\QuickFlacRecorder.exe
+```
+
+Commit the source used for the build before creating a source-matched preview:
+
+```powershell
+.\scripts\package-windows.ps1 -BuildDirectory build
+```
+
+The script finds `dumpbin` through the installed Visual Studio tools. It checks x64 machine type, rejects dynamic C/C++ runtime imports, and requires other imported DLLs to be Windows system libraries. It writes the executable, inspection output, launch instructions, licenses, source, and a SHA-256 hash into `dist/QuickFlacRecorder-windows-x64.zip`. This checks imports from the built executable. Native launch and actual input-device behavior still require acceptance checks on Windows 10/11.
+
+If JUCE came from a local checkout, pass `-JuceSource <path>` to the script. If Python is not named `python` in your environment, pass `-Python <absolute path to python.exe>`.
+
+## macOS universal
+
+Install Xcode's command-line tools, CMake, Ninja, and Python 3. Configure both slices with a macOS 12.0 deployment target:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+  '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64' -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+cmake --build build --target QuickFlacRecorder RecorderSessionTests --parallel 2
+ctest --test-dir build --output-on-failure --no-tests=error
+open build/QuickFlacRecorder_artefacts/Release/QuickFlacRecorder.app
+bash scripts/package-macos.sh build
+```
+
+`ctest` runs the slice native to the host. The package script verifies both binary architectures, checks each slice's deployment target is 12.0, requires only system dynamic-library imports, and verifies a microphone usage description is present. It adds notices to the app bundle, applies an ad-hoc signature for Apple Silicon loading, and verifies that signature. This does not authenticate a publisher or notarize the app. It produces `dist/QuickFlacRecorder-macos-universal.zip` with the inspection report and corresponding source. Real recording must be checked on both Intel and Apple Silicon, including microphone permission behavior.
+
+## Linux x64
+
+The CI host is `ubuntu-24.04`. The build runs inside `ubuntu:22.04` to retain the initial supported baseline. For a native Ubuntu 22.04 build, install the same prerequisites:
+
+```bash
+sudo apt-get update
+sudo apt-get install build-essential cmake ninja-build git ca-certificates curl python3 \
+  pkg-config libasound2-dev libjack-jackd2-dev libfreetype6-dev libfontconfig1-dev \
+  libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libgl1-mesa-dev xvfb xauth file
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build --target QuickFlacRecorder RecorderSessionTests --parallel 2
+xvfb-run -a ctest --test-dir build --output-on-failure --no-tests=error
+bash scripts/package-linux.sh build
+```
+
+Packaging uses versioned linuxdeploy and appimagetool assets with checked SHA-256 hashes. It obtains the AppImage runtime through an immutable GitHub release asset ID and verifies its hash. `GH_TOKEN` is optional and raises the GitHub API rate limit; Actions supplies its read-only workflow token. The script does not use the appimagetool default that fetches the latest runtime.
+
+The AppImage bundles its ELF dependencies and the ALSA library. JACK is optional and uses the host's compatible JACK library, including a PipeWire JACK implementation where available. The desktop's sound configuration, access to audio devices, display, and graphics drivers remain host responsibilities. The package contains copied-library copyright notices and exact source-package references. It produces `dist/QuickFlacRecorder-linux-x64.tar.gz`, containing the AppImage, instructions, licenses, source archive, and hash.
+
+The separate `linux-baseline` job extracts that package in a fresh Ubuntu 22.04 container with desktop runtime libraries and inspection tools, without build development packages. It rejects unresolved executable dependencies and bundled ELF files requiring GLIBC newer than 2.35. It starts the packaged GUI under Xvfb and requires it to remain running. Extraction avoids mounting FUSE inside CI. This establishes a baseline dependency/startup check when the job passes. It does not establish audio capture or full distribution compatibility.
+
+To run the same check in an Ubuntu 22.04 runtime environment:
+
+```bash
+bash scripts/verify-linux-baseline.sh dist/QuickFlacRecorder-linux-x64.tar.gz
+```
+
+## Source and verification records
+
+The packaging scripts refuse uncommitted tracked changes because their source archive uses `git archive HEAD`. Rebuild after changing application or dependency source. Do not describe a package as source-matched if it came from an earlier build. A local JUCE override must point at the same JUCE source used to compile the app. Shell package scripts accept build, destination, and JUCE-source paths as their first, second, and third arguments.
+
+The [Actions workflow](../.github/workflows/preview.yml) configures, builds, runs the session checks, and packages each platform. It has read-only repository permissions and no release-publishing step. Artifacts are unsigned previews retained for 30 days. The owner reviews the local Windows build and draft pull request before a public release.
+
+Keep evidence for the exact source commit and binary hash in the [acceptance record](acceptance.md). Pending jobs and hardware checks remain pending until their reports exist.
+
+## Tooling references
+
+The accepted framework version remains JUCE 9.0.3. The package scripts follow [CMake's static-runtime setting](https://cmake.org/cmake/help/latest/variable/CMAKE_MSVC_RUNTIME_LIBRARY.html), [GitHub's supported runner labels](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job), [AppImage baseline guidance](https://docs.appimage.org/introduction/concepts.html), [linuxdeploy's packaging process](https://github.com/linuxdeploy/linuxdeploy), and [appimagetool's explicit runtime option](https://github.com/AppImage/appimagetool/blob/1.9.1/README.md). These tooling references were checked on 2026-10-11.
