@@ -241,7 +241,7 @@ struct RecordingSession::Impl
     }
     juce::Result updatePreview()
     {
-        view.nextFile = {};
+        view.nextFile = juce::File{};
         auto valid = validate(config);
         if (valid.failed()) { view.message = valid.getErrorMessage(); return valid; }
         uint64_t next = 1;
@@ -382,7 +382,7 @@ juce::Result RecordingSession::start() try
         impl->view.message = message;
         return juce::Result::fail(message);
     };
-    impl->view.recordingFile = {}; impl->view.incomplete = false; impl->capturedFrames = 0;
+    impl->view.recordingFile = juce::File{}; impl->view.incomplete = false; impl->capturedFrames = 0;
     auto valid = impl->updatePreview();
     if (valid.failed()) return reject(valid.getErrorMessage());
     if (impl->options.captureCapacityFrames == 0 || impl->options.captureCapacityFrames > 16777216)
