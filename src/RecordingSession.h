@@ -51,11 +51,11 @@ public:
 
     RecordingSession();
     explicit RecordingSession(Options);
-    ~RecordingSession();
+    ~RecordingSession(); // Detach the input callback before destruction.
     RecordingSession(const RecordingSession&) = delete;
     RecordingSession& operator=(const RecordingSession&) = delete;
 
-    // Control-thread methods. Configuration updates also recompute the filename preview.
+    // Call these methods from one control thread. Configuration updates recompute the filename preview.
     juce::Result configure(const Configuration&);
     juce::Result refreshPreview();
     juce::Result start();
