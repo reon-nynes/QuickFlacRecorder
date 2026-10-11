@@ -46,6 +46,32 @@ cp -R "$package/licenses" "$notices/"
 mkdir -p "$package/licenses/Ubuntu"
 source_list="$package/linux-library-sources.txt"
 printf 'Bundled Ubuntu libraries and exact source retrieval commands\n\n' > "$source_list"
+library_owner() {
+    local library=$1 candidate record owner recorded_path
+    local candidates=("$library" "$(readlink -f "$library")")
+    for candidate in "${candidates[@]}"; do
+        case "$candidate" in
+            /usr/lib/*) candidates+=("${candidate#/usr}");;
+            /lib/*) candidates+=("/usr$candidate");;
+        esac
+    done
+    for candidate in "${candidates[@]}"; do
+        # Ubuntu usrmerge aliases may differ from paths recorded in dpkg.
+        [[ -e "$candidate" && "$candidate" -ef "$library" ]] || continue
+        if record=$(dpkg-query -S "$candidate" 2>/dev/null); then
+            while IFS= read -r record; do
+                owner=${record%%: /*}
+                recorded_path=${record#*: }
+                if [[ "$recorded_path" == "$candidate" && "$owner" =~ ^[a-z0-9][a-z0-9+.-]*(:[a-z0-9][a-z0-9-]*)?$ ]]; then
+                    printf '%s\n' "$owner"
+                    return 0
+                fi
+            done <<< "$record"
+        fi
+    done
+    echo "Cannot identify an exact Ubuntu package owner for $library" >&2
+    return 1
+}
 # Preserve distro notices and identify the matching sources for every library linuxdeploy copies.
 while IFS= read -r -d '' library; do
     name=$(basename "$library")
@@ -55,9 +81,7 @@ while IFS= read -r -d '' library; do
         original=$(find /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu -name "$name" -print -quit)
     fi
     [[ -n "$original" ]] || { echo "Cannot identify source package for $name" >&2; exit 1; }
-    original=$(readlink -f "$original")
-    owner=$(dpkg-query -S "$original" 2>/dev/null | head -n 1 | sed 's/: \/.*//')
-    [[ -n "$owner" ]] || { echo "Cannot identify Ubuntu package for $original" >&2; exit 1; }
+    owner=$(library_owner "$original")
     source=$(dpkg-query -W -f='${source:Package}=${source:Version}' "$owner")
     printf '%s: %s\n  apt-get source %s\n' "$name" "$owner" "$source" >> "$source_list"
     copyright="/usr/share/doc/${owner%%:*}/copyright"

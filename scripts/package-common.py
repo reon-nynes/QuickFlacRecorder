@@ -24,11 +24,24 @@ def main():
                     for macro in ["JUCE_MAJOR_VERSION", "JUCE_MINOR_VERSION", "JUCE_BUILDNUMBER"])
     if version != (9, 0, 3):
         parser.error(f"Expected JUCE 9.0.3 source, found {version}")
+
+    def git(*arguments, binary=False, allowed_codes=(0,)):
+        # Container-mounted workspaces can have a different owner. Trust only this
+        # source root for this process; do not modify global Git configuration.
+        command = ["git", "-c", "safe.directory=", "-c", f"safe.directory={root.as_posix()}", *arguments]
+        result = subprocess.run(command, cwd=root, capture_output=True, text=not binary)
+        if result.returncode not in allowed_codes:
+            detail = result.stderr.decode(errors="replace") if binary else result.stderr
+            parser.error(f"Git {' '.join(arguments)} failed in {root} (exit {result.returncode}): {detail.strip()}")
+        return result
+
+    top_level = Path(git("rev-parse", "--show-toplevel").stdout.strip()).resolve()
+    if top_level != root:
+        parser.error(f"Expected source repository root {root}, found {top_level}")
     # A committed source archive must match the application source used by the build.
-    if subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=root).returncode:
+    if git("diff", "--quiet", "HEAD", allowed_codes=(0, 1)).returncode == 1:
         parser.error("Commit tracked changes before packaging a corresponding-source preview")
-    untracked = subprocess.check_output(
-        ["git", "ls-files", "--others", "--exclude-standard"], cwd=root, text=True).strip()
+    untracked = git("ls-files", "--others", "--exclude-standard").stdout.strip()
     if untracked:
         parser.error("Commit or ignore untracked files before packaging: " + untracked.replace("\n", ", "))
     destination = args.destination.resolve()
@@ -48,8 +61,9 @@ def main():
             target = notices / "JUCE" / source.relative_to(juce)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
-    archive = subprocess.check_output(["git", "archive", "--format=zip", "HEAD"], cwd=root)
+    commit = git("rev-parse", "HEAD").stdout.strip()
+    # Keep canonical source bytes, including LF shell scripts, on Windows too.
+    archive = git("-c", "core.autocrlf=false", "archive", "--format=zip", "HEAD", binary=True).stdout
     source_name = "QuickFlacRecorder-source.zip"
     with zipfile.ZipFile(destination / source_name, "w", zipfile.ZIP_DEFLATED) as output:
         with zipfile.ZipFile(io.BytesIO(archive)) as application:
