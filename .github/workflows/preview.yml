@@ -1,0 +1,119 @@
+name: Build and package previews
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Configure Windows x64 with static runtime
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --config Release --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
+      - name: Check recording, localization, and native controls
+        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
+      - name: Inspect and package the executable
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -BuildDirectory build
+      - name: Upload unsigned preview and inspection evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: QuickFlacRecorder-windows-x64
+          path: dist/QuickFlacRecorder-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Configure macOS 12 universal app
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64' -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+      - name: Build
+        run: cmake --build build --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
+      - name: Check recording, localization, and native controls on the runner architecture
+        run: ctest --test-dir build --output-on-failure --no-tests=error
+      - name: Inspect and package the universal app
+        run: bash scripts/package-macos.sh build
+      - name: Upload unsigned preview and inspection evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: QuickFlacRecorder-macos-universal
+          path: dist/QuickFlacRecorder-macos-universal.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  linux:
+    runs-on: ubuntu-24.04
+    container: ubuntu:22.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install Ubuntu 22.04 build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake ninja-build git ca-certificates curl python3 \
+            pkg-config libasound2-dev libjack-jackd2-dev libfreetype6-dev libfontconfig1-dev \
+            libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libxi-dev libgl1-mesa-dev xvfb xauth file
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Configure Linux x64
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
+      - name: Check recording, localization, and native controls
+        run: xvfb-run -a ctest --test-dir build --output-on-failure --no-tests=error
+      - name: Package AppImage and license notices
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/package-linux.sh build
+      - name: Upload unsigned preview
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: QuickFlacRecorder-linux-x64
+          path: dist/QuickFlacRecorder-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  linux-baseline:
+    needs: linux
+    runs-on: ubuntu-24.04
+    container: ubuntu:22.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install desktop runtime and inspection tools, without build libraries
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates python3 binutils file xvfb xauth \
+            libasound2 libfontconfig1 libfreetype6 libx11-6 libxext6 libxinerama1 libxrandr2 libxcursor1 libxi6 libgl1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: QuickFlacRecorder-linux-x64
+          path: dist
+      - name: Inspect and launch packaged AppImage on the baseline
+        run: bash scripts/verify-linux-baseline.sh dist/QuickFlacRecorder-linux-x64.tar.gz
+      - name: Upload baseline evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-baseline-evidence
+          path: dist/linux-baseline.txt
+          if-no-files-found: error
+          retention-days: 30
