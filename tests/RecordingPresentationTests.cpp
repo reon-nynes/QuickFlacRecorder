@@ -6,6 +6,10 @@
 namespace
 {
 void require(bool value, const char* message) { if (! value) throw std::runtime_error(message); }
+bool containsExact(const juce::String& text, const juce::String& value)
+{
+    return text.toStdString().find(value.toStdString()) != std::string::npos;
+}
 void recordsStructuredSuccessAndFormatsInPresentation()
 {
     const auto folder = juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("qfr-language-test", "", false);
@@ -68,9 +72,39 @@ void formatsCompoundFailuresCountsAndEnglishFallback()
     require(qfr::recordingStatus(snapshot, english).contains("Captured audio was finalized")
         && !qfr::recordingStatus(snapshot, english).contains("Saved"), "interrupted finalized audio never claims successful capture");
 }
+void nativeDiskMessagesPreserveOperationDiagnosticsAndActualRecordingPath()
+{
+    const qfr::i18n::Translation english({ "en" }), chinese({ "zh-Hans" });
+    const auto raw = juce::String::fromUTF8("原始 {disk} # error\r\n");
+    const auto retained = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("actual_01.partial.flac");
+    for (const auto* translation : { &english, &chinese })
+    {
+        qfr::RecorderResult create { qfr::ErrorCode::createFailed, raw, {}, {}, { qfr::DiskOperation::create, 112, raw } };
+        const auto beforeCreation = qfr::resultMessage(create, *translation);
+        require(containsExact(beforeCreation, raw) && beforeCreation.contains("112") && !beforeCreation.contains("partial.flac"),
+            "native create error retains raw data and has no fictional retained recording");
+        create.code = qfr::ErrorCode::writerStartFailed;
+        const auto startup = qfr::resultMessage(create, *translation, retained);
+        require(containsExact(startup, raw) && containsExact(startup, retained.getFullPathName()), "native startup failure shows actual retained file");
+        qfr::RecordingSession::Snapshot snapshot;
+        snapshot.state = qfr::RecordingSession::State::failed;
+        snapshot.resultCode = qfr::RecordingSession::ResultCode::failed;
+        snapshot.failureReason = qfr::RecordingSession::FailureReason::inputLost;
+        snapshot.finalization = qfr::RecordingSession::FinalizationOutcome::diskFlushFailed;
+        snapshot.incomplete = true; snapshot.recordingFile = retained;
+        snapshot.inputDetail = "original input {diagnostic}";
+        snapshot.error = { qfr::ErrorCode::none, raw, {}, {}, { qfr::DiskOperation::flush, 112, raw } };
+        const auto compound = qfr::recordingStatus(snapshot, *translation);
+        require(containsExact(compound, snapshot.inputDetail) && containsExact(compound, raw) && compound.contains("112")
+            && containsExact(compound, retained.getFullPathName()) && !compound.contains("Saved") && !containsExact(compound, juce::String::fromUTF8("已保存")),
+            "compound native failure preserves both diagnostics and path without a successful-save claim");
+        require(containsExact(compound, translation == &english ? "flush recording to disk" : juce::String::fromUTF8("将录音刷新到磁盘")),
+            "disk operation is translated independently of original native diagnostic");
+    }
+}
 }
 int main()
 {
-    try { recordsStructuredSuccessAndFormatsInPresentation(); translatesValidationAndPreservesUserData(); formatsCompoundFailuresCountsAndEnglishFallback(); std::cout << "PASS recording presentation\n"; return 0; }
+    try { recordsStructuredSuccessAndFormatsInPresentation(); translatesValidationAndPreservesUserData(); formatsCompoundFailuresCountsAndEnglishFallback(); nativeDiskMessagesPreserveOperationDiagnosticsAndActualRecordingPath(); std::cout << "PASS recording presentation\n"; return 0; }
     catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
 }

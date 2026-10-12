@@ -3,6 +3,27 @@
 
 namespace qfr
 {
+namespace
+{
+juce::String withDiskDiagnostic(const juce::String& message, const RecorderResult& result, const i18n::Translation& translation)
+{
+    if (result.disk.operation == DiskOperation::none) return message;
+    juce::String operation;
+    switch (result.disk.operation)
+    {
+        case DiskOperation::create: operation = "create"; break;
+        case DiskOperation::write: operation = "write"; break;
+        case DiskOperation::seek: operation = "seek"; break;
+        case DiskOperation::flush: operation = "flush"; break;
+        case DiskOperation::close: operation = "close"; break;
+        case DiskOperation::promotion: operation = "promotion"; break;
+        case DiskOperation::cleanup: operation = "cleanup"; break;
+        case DiskOperation::none: break;
+    }
+    return translation.text(i18n::MessageId::DiskDiagnostic, { { "message", message }, { "operation", operation },
+        { "code", static_cast<double>(result.disk.nativeCode) }, { "detail", result.disk.detail } });
+}
+}
 RecordingAction recordingAction(RecordingSession::State state) noexcept
 {
     if (state == RecordingSession::State::recording) return RecordingAction::stop;
@@ -10,10 +31,11 @@ RecordingAction recordingAction(RecordingSession::State state) noexcept
     return RecordingAction::record;
 }
 
-juce::String resultMessage(const RecorderResult& result, const i18n::Translation& translation, const juce::File& retained)
+static juce::String basicResultMessage(const RecorderResult& result, const i18n::Translation& translation, const juce::File& retained)
 {
     using i18n::MessageId;
-    const juce::String diagnostic = result.detail.isNotEmpty() ? "yes" : "no";
+    const juce::String diagnostic = result.detail.isNotEmpty()
+        && (result.disk.operation == DiskOperation::none || result.detail != result.disk.detail) ? "yes" : "no";
     const auto startFailure = [&](MessageId id)
     {
         return translation.text(id, { { "retained", juce::String(retained == juce::File() ? "no" : "yes") },
@@ -73,6 +95,10 @@ juce::String resultMessage(const RecorderResult& result, const i18n::Translation
     return {};
 
 }
+juce::String resultMessage(const RecorderResult& result, const i18n::Translation& translation, const juce::File& retained)
+{
+    return withDiskDiagnostic(basicResultMessage(result, translation, retained), result, translation);
+}
 juce::String incompleteRecordingWarning(int count, const juce::String& path, const i18n::Translation& translation)
 {
     return translation.text(i18n::MessageId::IncompleteRecordings, { { "count", static_cast<double>(count) }, { "path", path } });
@@ -108,11 +134,12 @@ juce::String recordingStatus(const RecordingSession::Snapshot& snapshot, const i
                 case RecordingSession::FinalizationOutcome::promotionFailed: outcome = "promotionFailed"; break;
                 default: break;
             }
-            return translation.text(MessageId::RecordingFailure, { { "reason", reason }, { "outcome", outcome },
+            return withDiskDiagnostic(translation.text(MessageId::RecordingFailure, { { "reason", reason }, { "outcome", outcome },
                 { "path", snapshot.recordingFile.getFullPathName() }, { "detail", snapshot.error.detail },
                 { "inputDetail", snapshot.inputDetail },
                 { "inputDiagnostic", juce::String(snapshot.inputDetail.isNotEmpty() ? "yes" : "no") },
-                { "diagnostic", juce::String(snapshot.error.detail.isNotEmpty() ? "yes" : "no") } });
+                { "diagnostic", juce::String(snapshot.error.detail.isNotEmpty()
+                    && (snapshot.error.disk.operation == DiskOperation::none || snapshot.error.detail != snapshot.error.disk.detail) ? "yes" : "no") } }), snapshot.error, translation);
         }
     }
     return {};

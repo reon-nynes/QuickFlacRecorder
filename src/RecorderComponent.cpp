@@ -288,14 +288,19 @@ void RecorderComponent::configureSession()
     config.leftInputChannel = leftChannel.getSelectedId() - 1;
     config.rightInputChannel = mode.getSelectedId() == 2 ? rightChannel.getSelectedId() - 1 : -1;
     configurationError = session.configure(config);
-    if (configurationError.wasOk() && mode.getSelectedId() == 2 && rightChannel.getSelectedId() <= 0)
-        configurationError = { ErrorCode::stereoChannelsMissing };
-    else if (configurationError.wasOk() && leftChannel.getSelectedId() <= 0)
-        configurationError = { ErrorCode::monoChannelMissing };
+    validateChannelSelection();
 
     incompleteRecordings = config.targetFolder.isDirectory()
         ? config.targetFolder.findChildFiles(juce::File::findFiles, false, "*.partial.flac").size() : 0;
     updateStatus();
+}
+
+void RecorderComponent::validateChannelSelection()
+{
+    if (configurationError.wasOk() && mode.getSelectedId() == 2 && rightChannel.getSelectedId() <= 0)
+        configurationError = { ErrorCode::stereoChannelsMissing };
+    else if (configurationError.wasOk() && leftChannel.getSelectedId() <= 0)
+        configurationError = { ErrorCode::monoChannelMissing };
 }
 
 void RecorderComponent::toggleRecording()
@@ -321,11 +326,11 @@ void RecorderComponent::timerCallback()
     meter.update(session.readLevels());
     const auto snapshot = session.snapshot();
     const auto now = juce::Time::getMillisecondCounterHiRes();
-    if (snapshot.state == RecordingSession::State::idle && now - lastPreviewRefresh > 1000)
+    if (!snapshot.controlsLocked() && now - lastPreviewRefresh > 1000)
     {
-        // Recheck recoverable idle validation and channel selection together.
-        // Terminal recording outcomes remain untouched until an explicit action.
-        configureSession();
+        // Validate the next take without reconfiguring or clearing the last take.
+        configurationError = session.refreshPreview();
+        validateChannelSelection();
         lastPreviewRefresh = now;
     }
     updateStatus();
@@ -373,7 +378,14 @@ void RecorderComponent::updateStatus()
 
     auto message = recordingStatus(snapshot, translation);
     auto colour = theme::muted;
-    if (snapshot.state == RecordingSession::State::failed)
+    const bool terminal = snapshot.state == RecordingSession::State::failed || snapshot.state == RecordingSession::State::succeeded;
+    if (terminal && configurationError.failed())
+    {
+        message = translation.text(MessageId::NextRecordingUnavailable,
+            { { "outcome", message }, { "guidance", resultMessage(configurationError, translation) } });
+        colour = theme::danger;
+    }
+    else if (snapshot.state == RecordingSession::State::failed)
     {
         colour = theme::danger;
     }

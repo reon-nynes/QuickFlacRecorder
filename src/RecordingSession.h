@@ -34,6 +34,10 @@ public:
         std::function<std::unique_ptr<juce::OutputStream>(std::unique_ptr<juce::OutputStream>)> outputAdapter;
         // Writer-thread durability policy; the application uses five seconds.
         std::chrono::milliseconds diskFlushInterval { 5000 };
+        // Controlled native-operation boundary. Zero runs the real operation; a
+        // platform error simulates its failure. Close always releases the handle.
+        // Called only on control/writer threads, never from an audio callback.
+        std::function<uint64_t(DiskOperation, const juce::File&)> nativeError;
     };
 
     struct Snapshot

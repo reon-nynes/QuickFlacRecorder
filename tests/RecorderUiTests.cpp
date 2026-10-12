@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "RecorderComponent.h"
 #include "localization/SystemLanguages.h"
+#include "FolderWritePermission.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -208,6 +209,49 @@ void iconsDoNotUseCaptions(const juce::File& evidence)
     writeImage(button, evidence, "caption-independent-finalizing");
     button.setLookAndFeel(nullptr);
 }
+void terminalReadinessRecoversWithoutEditing(qfr::RecorderComponent& recorder, const juce::File& recordingFolder,
+    const qfr::i18n::Translation& translation, const juce::File& evidence = {})
+{
+    using qfr::i18n::MessageId;
+    auto& action = actionButton(recorder);
+    auto& status = childWithTitle<juce::Label>(recorder, translation.text(MessageId::StatusTitle));
+    auto& elapsed = childWithTitle<juce::Label>(recorder, translation.text(MessageId::ElapsedTitle));
+    auto& folder = childWithTitle<juce::TextEditor>(recorder, translation.text(MessageId::TargetFolder));
+    auto& prefix = childWithTitle<juce::TextEditor>(recorder, translation.text(MessageId::Prefix));
+    auto& driver = childWithTitle<juce::ComboBox>(recorder, translation.text(MessageId::AudioDriver));
+    auto& device = childWithTitle<juce::ComboBox>(recorder, translation.text(MessageId::InputDevice));
+    const auto selectedDriver = driver.getText(), selectedDevice = device.getText();
+    const auto outcome = status.getText(), time = elapsed.getText(), enteredFolder = folder.getText(), enteredPrefix = prefix.getText();
+    const auto poll = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil(1200); };
+    const auto moved = recordingFolder.getSiblingFile(recordingFolder.getFileName() + "-moved");
+    require(recordingFolder.moveFileTo(moved), "externally rename folder after terminal take");
+    poll();
+    const bool missingBlocked = !action.isEnabled() && status.getText().toStdString().find(outcome.toStdString()) != std::string::npos
+        && status.getText().toStdString().find(qfr::resultMessage({ qfr::ErrorCode::folderMissing }, translation).toStdString()) != std::string::npos;
+    writeImage(recorder, evidence, recordingFolder.getFileName() + "-missing-1.5", 1.5f);
+    require(moved.moveFileTo(recordingFolder), "restore same folder after terminal take");
+    poll();
+    require(missingBlocked && action.isEnabled() && status.getText() == outcome && elapsed.getText() == time,
+        "folder removal/restoration updates Record while preserving terminal message and elapsed time");
+    {
+        FolderWritePermission permission(recordingFolder);
+        poll();
+        const bool blocked = !action.isEnabled() && status.getText().toStdString().find(outcome.toStdString()) != std::string::npos
+            && status.getTooltip() == status.getText() && status.getDescription() == status.getText();
+        writeImage(recorder, evidence, recordingFolder.getFileName() + "-unwritable-1.5", 1.5f);
+        juce::TooltipWindow tooltip;
+        tooltip.setLookAndFeel(&recorder.getLookAndFeel());
+        tooltip.displayTip(recorder.getScreenPosition(), status.getTooltip());
+        writeImage(tooltip, evidence, recordingFolder.getFileName() + "-unwritable-tooltip-1.5", 1.5f);
+        tooltip.hideTip(); tooltip.setLookAndFeel(nullptr);
+        permission.restore();
+        poll();
+        require(blocked && action.isEnabled() && status.getText() == outcome, "permission change/restoration updates Record without replacing terminal result");
+    }
+    require(folder.getText() == enteredFolder && prefix.getText() == enteredPrefix && elapsed.getText() == time
+        && driver.getText() == selectedDriver && device.getText() == selectedDevice,
+        "passive readiness retains original folder, prefix, selected input, and elapsed time");
+}
 void nativeRecordingEvidence(const juce::File& root, const juce::File& evidence, const qfr::i18n::Translation& translation)
 {
     using qfr::i18n::MessageId;
@@ -274,6 +318,7 @@ void nativeRecordingEvidence(const juce::File& root, const juce::File& evidence,
     require(action.getAction() == qfr::RecordingAction::record && status.getText().contains(".flac")
         && ! status.getText().contains(".partial.flac"), "native Stop finishes saving and restores Record");
     writeImage(recorder, evidence, tag + "-saved-1.5", 1.5f);
+    terminalReadinessRecoversWithoutEditing(recorder, root, translation);
     mode.setSelectedId(2, juce::sendNotificationSync);
     writeImage(recorder, evidence, tag + "-stereo-1.5", 1.5f);
     recorder.grabKeyboardFocus(); sendSpace();
@@ -295,6 +340,45 @@ void nativeRecordingEvidence(const juce::File& root, const juce::File& evidence,
     juce::MessageManager::getInstance()->runDispatchLoopUntil(300);
     require(quit && action.getAction() == qfr::RecordingAction::record, "Stop and quit waits for successful finalization");
     recorder.removeFromDesktop();
+}
+void nativeTerminalReadiness(const juce::File& root, const juce::File& evidence, const qfr::i18n::Translation& translation)
+{
+    using qfr::i18n::MessageId;
+    for (const bool failDisk : { false, true })
+    {
+        const auto name = translation.language().tag + (failDisk ? "-failed-readiness" : "-saved-readiness");
+        const auto folder = root.getChildFile(name);
+        require(folder.createDirectory().wasOk(), "create readiness target folder");
+        juce::PropertiesFile::Options propertyOptions;
+        propertyOptions.applicationName = "qfr-readiness-test"; propertyOptions.filenameSuffix = ".settings";
+        juce::PropertiesFile settings(root.getChildFile(name + ".settings"), propertyOptions);
+        settings.setValue("targetFolder", folder.getFullPathName());
+        qfr::RecordingSession::Options options;
+        options.diskFlushInterval = std::chrono::milliseconds(100);
+        if (failDisk) options.nativeError = [](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+        {
+            if (operation != qfr::DiskOperation::flush || !file.getFileName().endsWith(".partial.flac")) return 0;
+           #if JUCE_WINDOWS
+            return ERROR_DISK_FULL;
+           #else
+            return ENOSPC;
+           #endif
+        };
+        qfr::RecorderComponent recorder(settings, translation, options);
+        recorder.addToDesktop(juce::ComponentPeer::windowIsTemporary); recorder.setVisible(true);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+        auto& action = actionButton(recorder);
+        require(action.isEnabled(), "real native input ready for terminal readiness regression");
+        action.triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(1100);
+        if (!failDisk) { action.triggerClick(); juce::MessageManager::getInstance()->runDispatchLoopUntil(300); }
+        auto& status = childWithTitle<juce::Label>(recorder, translation.text(MessageId::StatusTitle));
+        require(action.getAction() == qfr::RecordingAction::record && action.isEnabled()
+            && status.getText().contains(failDisk ? ".partial.flac" : ".flac"), "terminal take has retained recording outcome");
+        writeImage(recorder, evidence, name + "-1.5", 1.5f);
+        terminalReadinessRecoversWithoutEditing(recorder, folder, translation, evidence);
+        recorder.removeFromDesktop();
+    }
 }
 }
 int main(int argc, char** argv)
@@ -319,6 +403,12 @@ int main(int argc, char** argv)
         iconsDoNotUseCaptions(evidence);
         inputResultsDoNotDependOnLanguage();
         std::cout << "PASS bilingual controls, native identities, and caption-independent icons\n";
+        if (args.contains("--native-readiness"))
+        {
+            nativeTerminalReadiness(root, evidence, qfr::i18n::Translation({ "en" }));
+            nativeTerminalReadiness(root, evidence, qfr::i18n::Translation({ "zh-Hans" }));
+            std::cout << "PASS native bilingual readiness after successful/failed takes and folder/permission recovery\n";
+        }
         if (args.contains("--native-recording"))
         {
             nativeRecordingEvidence(root, evidence, qfr::i18n::Translation({ "en" }));

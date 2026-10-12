@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "RecordingSession.h"
+#include "FolderWritePermission.h"
 #include <iostream>
 #include <stdexcept>
 #include <cmath>
@@ -10,6 +11,8 @@
 #include <mutex>
 #include <thread>
 #include <barrier>
+#include <cstdlib>
+#include <cerrno>
 #if JUCE_WINDOWS
 #define NOMINMAX
 #include <windows.h>
@@ -27,7 +30,9 @@ void require(bool condition, const char* message)
 }
 struct Folder
 {
-    juce::File file = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    juce::File file = (std::getenv("QFR_TEST_TARGET_FOLDER") != nullptr
+                         ? juce::File(juce::String::fromUTF8(std::getenv("QFR_TEST_TARGET_FOLDER")))
+                         : juce::File::getSpecialLocation(juce::File::tempDirectory))
                          .getChildFile("qfr-tests-" + juce::Uuid().toString());
     Folder() { require(file.createDirectory().wasOk(), "create test folder"); }
     ~Folder() { file.deleteRecursively(); }
@@ -360,6 +365,7 @@ void finalizationLocksAnotherTakeAndPromotionDoesNotReplace()
     auto state = session.snapshot();
     auto canStart = session.start();
     auto canChange = session.configure(config(folder, "changed"));
+    auto canRefresh = session.refreshPreview();
     auto partialExists = state.recordingFile.existsAsFile();
     auto finalExists = folder.file.getChildFile("take_01.flac").exists();
     require(folder.file.getChildFile("take_01.flac").replaceWithText("existing final recording"), "create late promotion conflict");
@@ -370,9 +376,12 @@ void finalizationLocksAnotherTakeAndPromotionDoesNotReplace()
     disk->changed.notify_all();
     session.waitForStop();
     require(entered && state.state == qfr::RecordingSession::State::finalizing && partialExists && !finalExists, "partial file and locked finalizing state until FLAC finishes");
-    require(canStart.failed() && canChange.failed(), "another take and configuration are unavailable during finalization");
+    require(canStart.failed() && canChange.failed() && canRefresh.failed(), "another take, configuration, and preview changes are unavailable during finalization");
     state = session.snapshot();
     require(state.state == qfr::RecordingSession::State::failed && state.incomplete && state.finalization == qfr::RecordingSession::FinalizationOutcome::promotionFailed, "promotion conflict retains incomplete recording and reports failure");
+    require(state.error.detail.isNotEmpty(), "promotion conflict retains the original native disk diagnostic");
+    require(state.error.disk.operation == qfr::DiskOperation::promotion && state.error.disk.nativeCode != 0
+        && state.error.disk.detail == state.error.detail, "promotion exposes its operation, native code, and verbatim platform message");
     require(folder.file.getChildFile("take_01.flac").loadFileAsString() == "existing final recording", "promotion never replaces existing final recording");
     require(decode(state.recordingFile)->lengthInSamples == 0, "finalized partial is inspectable after promotion conflict");
 }
@@ -462,6 +471,150 @@ void startupDiskExceptionsReportFailureAndRetainReservation()
             && outcome.recordingFile.existsAsFile() && !outcome.controlsLocked()
             && outcome.error.code == qfr::ErrorCode::startFailed && outcome.error.detail == "disk unavailable", "startup exception reports failure and retains incomplete reservation");
 }
+void nativeDiskFailuresPreserveFirstDiagnosticAndRecordingOutcomes()
+{
+#if JUCE_WINDOWS
+    constexpr uint64_t firstCode = ERROR_DISK_FULL, laterCode = ERROR_INVALID_HANDLE;
+#else
+    constexpr uint64_t firstCode = ENOSPC, laterCode = EBADF;
+#endif
+    for (auto operation : { qfr::DiskOperation::create, qfr::DiskOperation::write, qfr::DiskOperation::seek,
+                            qfr::DiskOperation::flush, qfr::DiskOperation::close, qfr::DiskOperation::promotion })
+    {
+        Folder folder;
+        std::atomic<bool> armed { false }, injected { false };
+        qfr::RecordingSession::Options options;
+        options.nativeError = [&](qfr::DiskOperation current, const juce::File& file) -> uint64_t
+        {
+            if (!armed || !file.getFileName().endsWith(".partial.flac")) return 0;
+            if (current == operation) { injected = true; return firstCode; }
+            if (injected && (current == qfr::DiskOperation::flush || current == qfr::DiskOperation::close)) return laterCode;
+            return 0;
+        };
+        qfr::RecordingSession session(options);
+        require(session.configure(config(folder)).wasOk(), "native boundary configured with real writable folder");
+        const bool startup = operation == qfr::DiskOperation::create || operation == qfr::DiskOperation::write;
+        armed = startup;
+        const auto started = session.start();
+        if (!startup)
+        {
+            require(started.wasOk(), "start real FLAC before native operation fails");
+            std::array<float, 512> samples; samples.fill(.25f);
+            const float* input[] { samples.data() };
+            session.processInput(input, 1, 512);
+            armed = true;
+            session.inputLost();
+            session.retainInputDiagnostic("original input {error}");
+            session.waitForStop();
+        }
+        else require(started.failed(), "native creation/header write failure rejects start");
+        const auto outcome = session.snapshot();
+        require(injected && outcome.state == qfr::RecordingSession::State::failed
+            && outcome.error.disk.operation == operation && outcome.error.disk.nativeCode == firstCode
+            && outcome.error.disk.detail.isNotEmpty() && outcome.error.detail == outcome.error.disk.detail,
+            "structured native operation and first platform error survive later flush/close failures");
+        if (operation == qfr::DiskOperation::create)
+            require(outcome.recordingFile == juce::File() && !outcome.incomplete
+                && folder.file.findChildFiles(juce::File::findFiles, false).isEmpty(), "failure before create has no retained recording");
+        else
+            require(outcome.incomplete && outcome.recordingFile.existsAsFile()
+                && !folder.file.getChildFile("take_01.flac").exists(), "native saving failure keeps actual partial and never promotes it");
+        if (!startup)
+            require(outcome.failureReason == qfr::RecordingSession::FailureReason::inputLost
+                && outcome.inputDetail == "original input {error}", "native input interruption remains separate from native disk failure");
+        if (operation == qfr::DiskOperation::promotion || operation == qfr::DiskOperation::close)
+            require(decode(outcome.recordingFile)->lengthInSamples == 512, "finalized captured audio remains inspectable after close/promotion failure");
+        session.refreshPreview();
+        require(session.snapshot().error.disk.nativeCode == firstCode && session.snapshot().recordingFile == outcome.recordingFile,
+            "passive preview preserves native disk outcome");
+    }
+}
+void passiveReadinessPreservesSuccessfulAndFailedTakeOutcomes()
+{
+    for (const bool failDisk : { false, true })
+    {
+        Folder folder;
+        std::atomic<bool> armed { false };
+        qfr::RecordingSession::Options options;
+        options.nativeError = [&](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+        {
+            if (!armed || operation != qfr::DiskOperation::flush || !file.getFileName().endsWith(".partial.flac")) return 0;
+           #if JUCE_WINDOWS
+            return ERROR_DISK_FULL;
+           #else
+            return ENOSPC;
+           #endif
+        };
+        qfr::RecordingSession session(options);
+        require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start readiness take");
+        std::array<float, 512> samples; samples.fill(.5f);
+        const float* input[] { samples.data() };
+        session.processInput(input, 1, 512);
+        armed = failDisk;
+        if (failDisk) { session.inputLost(); session.retainInputDiagnostic("original native input failure"); }
+        else session.requestStop();
+        session.waitForStop();
+        const auto outcome = session.snapshot();
+        const auto unchanged = [&]
+        {
+            const auto current = session.snapshot();
+            require(current.state == outcome.state && current.resultCode == outcome.resultCode
+                && current.failureReason == outcome.failureReason && current.finalization == outcome.finalization
+                && current.recordingFile == outcome.recordingFile && current.incomplete == outcome.incomplete
+                && current.elapsedSeconds == outcome.elapsedSeconds && current.inputDetail == outcome.inputDetail
+                && current.error.code == outcome.error.code && current.error.detail == outcome.error.detail
+                && current.error.disk.operation == outcome.error.disk.operation && current.error.disk.nativeCode == outcome.error.disk.nativeCode,
+                "passive readiness preserves all terminal result fields and separate native diagnostics");
+        };
+        const auto moved = folder.file.getSiblingFile(folder.file.getFileName() + "-moved");
+        require(folder.file.moveFileTo(moved), "external target folder rename");
+        const auto missing = session.refreshPreview();
+        unchanged();
+        const bool cleared = session.snapshot().nextFile == juce::File();
+        require(moved.moveFileTo(folder.file), "external target folder restoration");
+        require(missing.code == qfr::ErrorCode::folderMissing && cleared, "missing folder returns current validation and clears preview");
+        require(session.refreshPreview().wasOk() && session.snapshot().nextFile.getFileName() == "take_02.flac", "restored folder recovers next filename and retains occupied counter");
+        unchanged();
+       #if !JUCE_WINDOWS
+        if (getuid() == 0) continue;
+       #endif
+        {
+            FolderWritePermission permission(folder.file);
+            const auto denied = session.refreshPreview();
+            unchanged();
+            permission.restore();
+            require(denied.failed() && session.refreshPreview().wasOk(), "permission changes and recovery update public readiness without configuration edits");
+            unchanged();
+        }
+        require(folder.file.getChildFile("take_99.partial.flac").replaceWithText("occupied"), "new occupied counter after recovery");
+        require(session.refreshPreview().wasOk() && session.snapshot().nextFile.getFileName() == "take_100.flac", "recovery reflects externally occupied counters");
+        unchanged();
+    }
+}
+void adapterExceptionDoesNotSuppressNativeCloseDiagnostic()
+{
+    Folder folder;
+    auto disk = std::make_shared<DiskControl>();
+    auto options = diskOptions(disk);
+    options.nativeError = [](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+    {
+        if (operation != qfr::DiskOperation::close || !file.getFileName().endsWith(".partial.flac")) return 0;
+       #if JUCE_WINDOWS
+        return ERROR_INVALID_HANDLE;
+       #else
+        return EBADF;
+       #endif
+    };
+    qfr::RecordingSession session(options);
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start mixed adapter/native failure take");
+    disk->failNextFlush = true;
+    session.requestStop(); session.waitForStop();
+    const auto result = session.snapshot();
+    require(result.state == qfr::RecordingSession::State::failed && result.incomplete
+        && result.error.detail == "disk flush refused" && result.error.disk.operation == qfr::DiskOperation::close
+        && result.error.disk.nativeCode != 0 && result.error.disk.detail.isNotEmpty(),
+        "adapter exception and first native close error remain independently available");
+}
 void counterExhaustionRequiresAnExplicitNewPrefix()
 {
     Folder folder;
@@ -498,10 +651,21 @@ void stopRacesAnInputBlockAndDeviceLossWithoutPartialAcceptance()
     }
 }
 }
-int main()
+int main(int argc, char** argv)
 {
     try
     {
+        if (argc == 2 && juce::String(argv[1]) == "--promotion-only")
+        {
+            previewUsesHighestOccupiedCounter();
+            savesSelectedMonoAndDrainsBeforePromotion();
+            metersAndSavesSelectedStereoInOrder();
+            finalizationLocksAnotherTakeAndPromotionDoesNotReplace();
+            concurrentReservationRechecksChangedFolderContents();
+            nativeDiskFailuresPreserveFirstDiagnosticAndRecordingOutcomes();
+            std::cout << "PASS filesystem mono/stereo FLAC, counter advancement, conflict, concurrent reservation, and native promotion failure\n";
+            return 0;
+        }
         previewUsesHighestOccupiedCounter();
         std::cout << "PASS filename preview\n";
         rejectsUnsafeConfigurations();
@@ -528,6 +692,11 @@ int main()
         rejectsAnUnwritableExistingFolder();
         std::cout << "PASS unwritable target folder\n";
         startupDiskExceptionsReportFailureAndRetainReservation();
+        nativeDiskFailuresPreserveFirstDiagnosticAndRecordingOutcomes();
+        adapterExceptionDoesNotSuppressNativeCloseDiagnostic();
+        std::cout << "PASS native create/write/seek/flush/close/promotion diagnostics\n";
+        passiveReadinessPreservesSuccessfulAndFailedTakeOutcomes();
+        std::cout << "PASS passive readiness retains successful/failed terminal results through external folder and permission changes\n";
         counterExhaustionRequiresAnExplicitNewPrefix();
         std::cout << "PASS startup disk exception\n";
         stopRacesAnInputBlockAndDeviceLossWithoutPartialAcceptance();

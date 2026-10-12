@@ -41,6 +41,7 @@ private:
     void populateChannels();
     void openInput();
     void configureSession();
+    void validateChannelSelection();
     void toggleRecording();
     void chooseFolder();
     void savePreferences();

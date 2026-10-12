@@ -4,6 +4,15 @@
 
 namespace qfr
 {
+enum class DiskOperation { none, create, write, seek, flush, close, promotion, cleanup };
+
+struct DiskDiagnostic
+{
+    DiskOperation operation = DiskOperation::none;
+    uint64_t nativeCode = 0; // GetLastError on Windows, errno on macOS/Linux.
+    juce::String detail; // Original platform message, never translated or parsed.
+};
+
 enum class ErrorCode
 {
     none, prefixLength, prefixCharacters, prefixReserved, folderMissing, folderNotWritable,
@@ -22,6 +31,7 @@ struct RecorderResult
     juce::String detail;
     juce::String driver;
     juce::String device;
+    DiskDiagnostic disk;
     bool wasOk() const noexcept { return code == ErrorCode::none; }
     bool failed() const noexcept { return ! wasOk(); }
 };
