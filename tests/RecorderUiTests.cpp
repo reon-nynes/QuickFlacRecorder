@@ -223,6 +223,16 @@ void terminalReadinessRecoversWithoutEditing(qfr::RecorderComponent& recorder, c
     const auto selectedDriver = driver.getText(), selectedDevice = device.getText();
     const auto outcome = status.getText(), time = elapsed.getText(), enteredFolder = folder.getText(), enteredPrefix = prefix.getText();
     const auto poll = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil(1200); };
+    const auto externalPartial = recordingFolder.getChildFile("external.partial.flac");
+    require(externalPartial.replaceWithText("incomplete"), "add incomplete recording after terminal take");
+    poll();
+    require(status.getText() == outcome && elapsed.getText() == time && action.isEnabled()
+        && status.getTooltip() == outcome && status.getDescription() == outcome,
+        "passive count addition preserves terminal path, incomplete status, diagnostics, and elapsed time");
+    require(externalPartial.deleteFile(), "remove external incomplete recording after terminal take");
+    poll();
+    require(status.getText() == outcome && elapsed.getText() == time && action.isEnabled(),
+        "passive count removal preserves terminal outcome");
     const auto moved = recordingFolder.getSiblingFile(recordingFolder.getFileName() + "-moved");
     require(recordingFolder.moveFileTo(moved), "externally rename folder after terminal take");
     poll();
@@ -251,6 +261,77 @@ void terminalReadinessRecoversWithoutEditing(qfr::RecorderComponent& recorder, c
     require(folder.getText() == enteredFolder && prefix.getText() == enteredPrefix && elapsed.getText() == time
         && driver.getText() == selectedDriver && device.getText() == selectedDevice,
         "passive readiness retains original folder, prefix, selected input, and elapsed time");
+}
+void nativeIncompleteWarnings(const juce::File& root, const qfr::i18n::Translation& translation)
+{
+    using qfr::i18n::MessageId;
+    const auto recordingFolder = root.getChildFile(translation.language().tag + "-incomplete-{folder}");
+    require(recordingFolder.createDirectory().wasOk(), "create isolated incomplete-recording folder");
+    juce::PropertiesFile::Options options;
+    options.applicationName = "qfr-incomplete-test"; options.filenameSuffix = ".settings";
+    juce::PropertiesFile settings(root.getChildFile(translation.language().tag + "-incomplete.settings"), options);
+    settings.setValue("targetFolder", recordingFolder.getFullPathName() + juce::File::getSeparatorString());
+    qfr::RecorderComponent recorder(settings, translation);
+    auto& action = actionButton(recorder);
+    auto& status = childWithTitle<juce::Label>(recorder, translation.text(MessageId::StatusTitle));
+    auto& folder = childWithTitle<juce::TextEditor>(recorder, translation.text(MessageId::TargetFolder));
+    auto& prefix = childWithTitle<juce::TextEditor>(recorder, translation.text(MessageId::Prefix));
+    auto& driver = childWithTitle<juce::ComboBox>(recorder, translation.text(MessageId::AudioDriver));
+    auto& device = childWithTitle<juce::ComboBox>(recorder, translation.text(MessageId::InputDevice));
+    const auto enteredFolder = folder.getText(), enteredPrefix = prefix.getText();
+    const auto selectedDriver = driver.getText(), selectedDevice = device.getText();
+    const auto poll = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil(1200); };
+    const auto expectCount = [&](int count)
+    {
+        poll();
+        require(status.getText() == (count == 0 ? translation.text(MessageId::Ready)
+            : qfr::incompleteRecordingWarning(count, enteredFolder, translation)), "passive warning matches current count and entered folder");
+        require(action.isEnabled() && status.getTooltip() == status.getText() && status.getDescription() == status.getText(),
+            "incomplete warning preserves Record readiness and full accessible message");
+        require(folder.getText() == enteredFolder && prefix.getText() == enteredPrefix
+            && driver.getText() == selectedDriver && device.getText() == selectedDevice,
+            "passive count refresh preserves entered configuration and selected input");
+    };
+    expectCount(0);
+    std::cout << "Passive incomplete warnings: " << translation.language().tag << ", "
+        << selectedDriver << ", " << selectedDevice << '\n';
+    const auto first = recordingFolder.getChildFile("other-prefix_01.partial.flac");
+    const auto second = recordingFolder.getChildFile("external.partial.flac");
+    require(first.replaceWithText("incomplete"), "externally add first incomplete recording");
+    expectCount(1);
+    require(second.replaceWithText("incomplete"), "externally add second incomplete recording");
+    require(recordingFolder.getChildFile("complete.flac").replaceWithText("complete")
+        && recordingFolder.getChildFile("ignore.partial.flac.bak").replaceWithText("backup")
+        && recordingFolder.getChildFile("directory.partial.flac").createDirectory().wasOk()
+        && recordingFolder.getChildFile("nested").createDirectory().wasOk()
+        && recordingFolder.getChildFile("nested/hidden.partial.flac").replaceWithText("nested")
+        && root.getChildFile("outside.partial.flac").replaceWithText("outside"), "seed excluded files and directories");
+    expectCount(2);
+    require(first.deleteFile(), "externally remove one of multiple incomplete recordings");
+    expectCount(1);
+    require(second.deleteFile(), "externally clear incomplete recordings");
+    expectCount(0);
+    require(first.replaceWithText("incomplete") && second.replaceWithText("incomplete"), "restore incomplete fixtures for folder recovery");
+    expectCount(2);
+    const auto moved = recordingFolder.getSiblingFile(recordingFolder.getFileName() + "-moved");
+    require(recordingFolder.moveFileTo(moved), "externally remove selected folder with incomplete recordings");
+    poll();
+    require(!action.isEnabled() && !recordingFolder.exists() && folder.getText() == enteredFolder
+        && status.getText() == qfr::resultMessage({ qfr::ErrorCode::folderMissing }, translation),
+        "missing folder takes priority without recreation or redirection");
+    require(moved.getChildFile(first.getFileName()).deleteFile(), "remove incomplete recording while folder is missing");
+    require(moved.moveFileTo(recordingFolder), "restore selected folder externally");
+    expectCount(1);
+    require(second.deleteFile(), "externally remove last incomplete recording");
+    expectCount(0);
+    const auto otherFolder = root.getChildFile(translation.language().tag + "-other-incomplete");
+    require(otherFolder.createDirectory().wasOk() && otherFolder.getChildFile("other.partial.flac").replaceWithText("incomplete"),
+        "create another target folder with a different count");
+    folder.setText(otherFolder.getFullPathName());
+    poll();
+    require(status.getText() == qfr::incompleteRecordingWarning(1, folder.getText(), translation), "warning counts currently entered target folder");
+    folder.setText(enteredFolder);
+    expectCount(0);
 }
 void nativeRecordingEvidence(const juce::File& root, const juce::File& evidence, const qfr::i18n::Translation& translation)
 {
@@ -403,6 +484,12 @@ int main(int argc, char** argv)
         iconsDoNotUseCaptions(evidence);
         inputResultsDoNotDependOnLanguage();
         std::cout << "PASS bilingual controls, native identities, and caption-independent icons\n";
+        if (args.contains("--native-incomplete"))
+        {
+            nativeIncompleteWarnings(root, qfr::i18n::Translation({ "en" }));
+            nativeIncompleteWarnings(root, qfr::i18n::Translation({ "zh-Hans" }));
+            std::cout << "PASS native bilingual passive incomplete-recording additions, removals, matching, and folder recovery\n";
+        }
         if (args.contains("--native-readiness"))
         {
             nativeTerminalReadiness(root, evidence, qfr::i18n::Translation({ "en" }));

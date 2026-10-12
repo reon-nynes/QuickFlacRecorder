@@ -42,6 +42,7 @@ private:
     void openInput();
     void configureSession();
     void validateChannelSelection();
+    void refreshIncompleteRecordings();
     void toggleRecording();
     void chooseFolder();
     void savePreferences();

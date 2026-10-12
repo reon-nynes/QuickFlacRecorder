@@ -290,9 +290,15 @@ void RecorderComponent::configureSession()
     configurationError = session.configure(config);
     validateChannelSelection();
 
-    incompleteRecordings = config.targetFolder.isDirectory()
-        ? config.targetFolder.findChildFiles(juce::File::findFiles, false, "*.partial.flac").size() : 0;
+    refreshIncompleteRecordings();
     updateStatus();
+}
+
+void RecorderComponent::refreshIncompleteRecordings()
+{
+    const juce::File folder(targetFolder.getText());
+    incompleteRecordings = folder.isDirectory()
+        ? folder.findChildFiles(juce::File::findFiles, false, "*.partial.flac").size() : 0;
 }
 
 void RecorderComponent::validateChannelSelection()
@@ -331,6 +337,7 @@ void RecorderComponent::timerCallback()
         // Validate the next take without reconfiguring or clearing the last take.
         configurationError = session.refreshPreview();
         validateChannelSelection();
+        refreshIncompleteRecordings();
         lastPreviewRefresh = now;
     }
     updateStatus();
