@@ -84,6 +84,8 @@ Linux hardware evidence: pending. The fresh-container baseline checks do not est
 
 ## Evidence entry format
 
+Issue #12's [recording reliability validation](validation/reliability.md) records source `b4c9165`, Windows and Linux Release builds and 4/4 CTest results, native bilingual Windows readiness after successful/failed takes, controlled native-operation errors, and real FLAC recording/promotion on a Linux exFAT FUSE image without hard links. Native macOS and the Linux kernel exFAT driver remain pending; these observations do not complete the wider hardware checklists above.
+
 For each completed check, add the date, platform/version, source commit, binary hash, device/audio-driver details when relevant, result, and a link or path to the output or observation. Keep failed and partial outcomes visible. Do not mark unrelated checks complete because one platform passed.
 
 Public-release review remains pending until the owner reviews the working build. The workflow produces review artifacts and does not publish a public release.
