@@ -312,7 +312,7 @@ void RecorderComponent::validateChannelSelection()
 void RecorderComponent::toggleRecording()
 {
     const auto state = session.snapshot().state;
-    if (state == RecordingSession::State::recording)
+    if (state == RecordingSession::State::recording || state == RecordingSession::State::recovering)
     {
         session.requestStop();
         updateStatus();
@@ -328,7 +328,7 @@ void RecorderComponent::toggleRecording()
 void RecorderComponent::timerCallback()
 {
     const auto error = input.pollError();
-    if (error.failed()) inputError = error;
+    if (error.failed() || input.isAvailable()) inputError = error;
     meter.update(session.readLevels());
     const auto snapshot = session.snapshot();
     const auto now = juce::Time::getMillisecondCounterHiRes();
@@ -363,7 +363,7 @@ void RecorderComponent::updateStatus()
         snapshot.state == RecordingSession::State::recording ? theme::record.interpolatedWith(theme::surface, 0.65f)
         : snapshot.state == RecordingSession::State::finalizing ? theme::surface
         : theme::record.interpolatedWith(theme::surface, 0.85f));
-    recordButton.setEnabled(snapshot.state == RecordingSession::State::recording
+    recordButton.setEnabled(snapshot.state == RecordingSession::State::recording || snapshot.state == RecordingSession::State::recovering
         || (! locked && input.isAvailable() && inputError.wasOk() && configurationError.wasOk()));
     leftLabel.setText(translation.text(mode.getSelectedId() == 2 ? MessageId::LeftInput : MessageId::MonoInput), juce::dontSendNotification);
     leftChannel.setTitle(leftLabel.getText());

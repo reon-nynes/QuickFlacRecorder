@@ -77,6 +77,8 @@ juce::String InputController::defaultDevice(const juce::String& driverName) cons
 
 void InputController::close()
 {
+    if (recordingChannelNames.isEmpty() && session.snapshot().controlsLocked()) recordingChannelNames = channelNames;
+    inputVerified = false;
     intentionalStop.store(true);
     if (device)
     {
@@ -93,9 +95,12 @@ void InputController::close()
 
 RecorderResult InputController::open(const juce::String& driverName, const juce::String& deviceName)
 {
+    const auto snapshot = session.snapshot();
+    if (!snapshot.controlsLocked()) recordingChannelNames.clear();
+    else if (recordingChannelNames.isEmpty()) recordingChannelNames = channelNames;
     close();
     deviceLost.store(false);
-    { const juce::ScopedLock lock(diagnosticLock); nativeDetail.clear(); }
+    nativeDetail.clear(); diagnosticState = 0;
     selectedDriver = driverName;
     selectedDevice = deviceName;
     auto* type = findType(driverName);
@@ -109,10 +114,16 @@ RecorderResult InputController::open(const juce::String& driverName, const juce:
     if (! device)
         return { ErrorCode::deviceCreateFailed, {}, driverName, deviceName };
     channelNames = device->getInputChannelNames();
+    inputChannelCount = channelNames.size();
     if (channelNames.isEmpty())
     {
         close();
         return { ErrorCode::noInputChannels, {}, driverName, deviceName };
+    }
+    if (!selectedChannelsMatch(channelNames))
+    {
+        close();
+        return { snapshot.rightInputChannel < 0 ? ErrorCode::monoChannelMissing : ErrorCode::stereoChannelsMissing };
     }
 
     juce::BigInteger inputs;
@@ -129,35 +140,62 @@ RecorderResult InputController::open(const juce::String& driverName, const juce:
     }
     streamRate.store(device->getCurrentSampleRate());
     intentionalStop.store(false);
+    inputVerified = true;
     device->start(this);
     if (! device->isPlaying())
     {
         close();
-        const juce::ScopedLock lock(diagnosticLock);
-        return { ErrorCode::deviceStartFailed, nativeDetail, driverName, deviceName };
+        return { ErrorCode::deviceStartFailed, diagnosticState.load(std::memory_order_acquire) == 2 ? nativeDetail : juce::String(), driverName, deviceName };
     }
     return {};
 }
 
+bool InputController::selectedChannelsMatch(const juce::StringArray& current) const
+{
+    if (recordingChannelNames.isEmpty()) return true;
+    const auto snapshot = session.snapshot();
+    const auto matches = [&](int channel)
+    {
+        return channel >= 0 && channel < recordingChannelNames.size() && channel < current.size()
+            && recordingChannelNames[channel] == current[channel];
+    };
+    return matches(snapshot.leftInputChannel) && (snapshot.rightInputChannel < 0 || matches(snapshot.rightInputChannel));
+}
+
 bool InputController::isAvailable() const
 {
-    return device && ! deviceLost.load() && device->isOpen() && device->isPlaying();
+    return device && inputVerified && ! deviceLost.load() && device->isOpen() && device->isPlaying();
 }
 
 RecorderResult InputController::pollError()
 {
+    if (device && device->isPlaying() && !inputVerified)
+    {
+        const auto current = device->getInputChannelNames();
+        if (recordingChannelNames.isEmpty()) recordingChannelNames = channelNames;
+        if (selectedChannelsMatch(current)) { channelNames = current; inputChannelCount = current.size(); inputVerified = true; }
+        else { deviceLost = true; session.inputLost(); }
+    }
     if (device && (! device->isOpen() || ! device->isPlaying()))
     {
         deviceLost.store(true);
         session.inputLost();
     }
+    RecorderResult result;
     if (deviceLost.load())
     {
-        const juce::ScopedLock lock(diagnosticLock);
-        session.retainInputDiagnostic(nativeDetail);
-        return { ErrorCode::deviceLost, nativeDetail, selectedDriver, selectedDevice };
+        const auto detail = diagnosticState.load(std::memory_order_acquire) == 2 ? nativeDetail : juce::String();
+        session.retainInputDiagnostic(detail);
+        result = { ErrorCode::deviceLost, detail, selectedDriver, selectedDevice };
     }
-    return {};
+    if (session.takeInputRecoveryRequest())
+    {
+        const auto driverName = selectedDriver, deviceName = selectedDevice;
+        rescan();
+        result = open(driverName, deviceName);
+        session.inputRecoveryFinished(result);
+    }
+    return result;
 }
 
 void InputController::rescan()
@@ -181,13 +219,12 @@ void InputController::audioDeviceIOCallbackWithContext(const float* const* input
     {
         const auto count = openedDevice->getXRunCount();
         const auto previous = lastXRunCount.exchange(count);
-        // Update the baseline while idle too, so historical overruns cannot fail a
-        // later take. The session ignores idle notifications and rejects this block
-        // if a supported driver's count advances during capture. -1 is unsupported.
+        // Historical xruns do not belong to a later recording. An advancing count
+        // documents missing samples while this callback's valid audio continues.
         if (count >= 0 && previous >= 0 && count > previous)
-            session.inputDiscontinuity();
+            session.inputDiscontinuity(static_cast<uint64_t>(count - previous));
     }
-    session.processInput(inputs, inputChannels, frames);
+    if (inputVerified) session.processInput(inputs, inputChannels, frames);
 }
 
 void InputController::audioDeviceAboutToStart(juce::AudioIODevice* openedDevice)
@@ -195,10 +232,11 @@ void InputController::audioDeviceAboutToStart(juce::AudioIODevice* openedDevice)
     const auto newRate = openedDevice->getCurrentSampleRate();
     if (started.exchange(true))
     {
-        deviceLost.store(true);
-        session.inputLost(); // An unsolicited restart can change rate or lose samples.
+        inputVerified = false;
+        session.inputLost();
     }
     streamRate.store(newRate);
+    session.inputFormatChanged(newRate, inputChannelCount);
     callbackDevice.store(openedDevice);
     lastXRunCount.store(openedDevice->getXRunCount());
 }
@@ -215,7 +253,14 @@ void InputController::audioDeviceStopped()
 
 void InputController::audioDeviceError(const juce::String& detail)
 {
-    { const juce::ScopedLock lock(diagnosticLock); if (nativeDetail.isEmpty()) nativeDetail = detail; }
+    unsigned expected = 0;
+    if (diagnosticState.compare_exchange_strong(expected, 1))
+    {
+        // JUCE String copy shares its immutable, reference-counted text. Publish
+        // the first diagnostic without a callback lock or text allocation.
+        nativeDetail = detail;
+        diagnosticState.store(2, std::memory_order_release);
+    }
     deviceLost.store(true);
     session.inputLost();
 }

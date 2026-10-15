@@ -1,4 +1,7 @@
 {
+  "recovering": "Recovering: {filename}. Stop remains available.",
+  "saved_with_errors": "Saved with recording errors: {filename}. Recording log: {path}",
+  "recording_log_failed": "Recording stopped because the required log could not be written: {log}. Retained audio: {path}. Check free disk space and target folder permissions.",
   "target_folder": "Target folder",
   "prefix": "Prefix",
   "audio_driver": "Audio driver",

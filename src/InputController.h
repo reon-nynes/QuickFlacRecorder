@@ -50,12 +50,16 @@ private:
     std::unique_ptr<juce::AudioIODevice> device;
     juce::String selectedDriver, selectedDevice;
     juce::StringArray channelNames;
+    juce::StringArray recordingChannelNames;
+    bool selectedChannelsMatch(const juce::StringArray&) const;
     std::atomic<double> streamRate { 0 };
     double rateBeforeOpen = 0;
     std::atomic<juce::AudioIODevice*> callbackDevice { nullptr };
     std::atomic<int> lastXRunCount { -1 };
     std::atomic<bool> intentionalStop { true }, deviceLost { false }, started { false };
-    juce::CriticalSection diagnosticLock;
+    std::atomic<bool> inputVerified { false };
+    std::atomic<unsigned> diagnosticState { 0 }; // Empty, callback publishing, ready.
+    std::atomic<int> inputChannelCount { 0 };
     juce::String nativeDetail;
 };
 }

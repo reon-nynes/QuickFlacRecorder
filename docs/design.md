@@ -1,6 +1,6 @@
 # Recorder design interview
 
-Status: all design decisions accepted; the user requested publication through to-spec and confirmed the recording-session test boundary on 2026-10-11. The implementation specification is [GitHub issue #1](https://github.com/reon-nynes/QuickFlacRecorder/issues/1), labelled ready-for-agent, with a local copy in [spec.md](spec.md). Application implementation is the next task.
+Status: the original design is implemented. [Issue #14](https://github.com/reon-nynes/QuickFlacRecorder/issues/14) replaces the original stop-on-first-fault policy with the recovery, rollover, and recording-log behavior in [ADR 0004](adr/0004-continue-recording-through-recoverable-faults.md). The owner confirmed that the ten-second no-progress deadline also applies to storage retries and confirmed the existing session, input, and presentation/UI test boundaries on 2026-10-15. [spec.md](spec.md) records the current requirements.
 
 ## User requirements
 
@@ -52,7 +52,7 @@ Rounds 1, 2, and 3 are accepted. The decision frontier is empty. The user has ac
 | Audio backends and rate | WASAPI shared/exclusive and ASIO; CoreAudio; ALSA/optional JACK; preserve opened stream rate | Settled |
 | Preferences | Remember folder, input/channel selections and window position; new prefix each launch | Settled |
 | Interface | Dark 600 by 400 logical-pixel content area; centered 32-pixel timer, 140 by 64 Record/Stop action, larger type, explicit channels and peak meters | Settled, updated by #8 |
-| Recording reliability | Stop on failures, preserve finalizable audio, .partial.flac until finalized, no silent overwrite | Settled |
+| Recording reliability | Continue through sample loss, bounded recovery and safe storage retries, automatic rollover for incompatible input rates, required accompanying logs, .partial.flac until finalized | Settled by #14 |
 | Validation and release | Focused automated checks and three-platform CI; Windows hardware check; unsigned previews; public release after review | Settled |
 
 ## Accepted in round 1
@@ -101,7 +101,9 @@ Each Record/Stop cycle produces one 16-bit FLAC containing exactly the selected 
 
 The save-name field contains the prefix rather than the extension or counter. For example, the prefix `2026-10-11_14-30-00` yields `2026-10-11_14-30-00_01.flac`, then `_02.flac`. The next counter is one more than the highest occupied counter for that exact prefix in the chosen folder. Counters use at least two digits, so 99 is followed by 100. Both final `.flac` and `.partial.flac` names reserve their numbers; gaps are not reused. Changes to the prefix or folder update the preview, and recording start rechecks and reserves the name without replacing another app instance's file. Prefixes must form safe portable filenames.
 
-During recording, folder, prefix, and audio selections are locked. Stop drains and finalizes the recording before enabling another take. The writer uses a `.partial.flac` filename and promotes it to the final name only after successful finalization without overwriting an existing final file. Input loss or a write/recording failure stops capture, preserves audio that can be finalized, and reports an error. Interrupted files remain available for inspection; automatic repair is outside v1. Closing mid-take offers Continue recording or Stop and quit. Space toggles recording when a field or selector is not being edited.
+During recording, folder, prefix, and audio selections are locked. Missing samples are omitted and logged while valid audio continues in the same FLAC. Input interruptions reopen only the selected audio driver, input device, and channels, immediately and then at three and six seconds. Three failed attempts or ten seconds without recording progress ends recovery. Saving incoming audio resets the allowance. Compatible reopening keeps the same filename; an incompatible input stream rate change automatically finalizes the old recording and starts the next available counter at the actual new rate, without resampling. Both recordings have linked logs, and each new recording resets its timer.
+
+The writer uses a `.partial.flac` name until successful finalization and never replaces existing audio or logs. Clean recordings produce only FLAC; the first error creates an accompanying UTF-8 recording log with English descriptions, native diagnostics, timezone timestamps, gap positions/durations, attempts, and outcomes. Leftover logs occupy counters. Storage operations receive three retries following their triggering failure, subject to the ten-second no-progress deadline. A required log failure immediately stops capture and automatic restarting. Successfully finalized audio with logged errors has a saved-with-errors status; unsuccessful finalization retains the incomplete recording. Stop cancels recovery and rollover, then drains and finalizes already captured audio under the storage retry policy. Closing mid-take offers Continue recording or Stop and quit. Space toggles recording when a field or selector is not being edited.
 
 ## Implementation and acceptance plan
 

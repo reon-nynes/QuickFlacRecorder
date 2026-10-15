@@ -26,7 +26,7 @@ juce::String withDiskDiagnostic(const juce::String& message, const RecorderResul
 }
 RecordingAction recordingAction(RecordingSession::State state) noexcept
 {
-    if (state == RecordingSession::State::recording) return RecordingAction::stop;
+    if (state == RecordingSession::State::recording || state == RecordingSession::State::recovering) return RecordingAction::stop;
     if (state == RecordingSession::State::finalizing) return RecordingAction::finalizing;
     return RecordingAction::record;
 }
@@ -111,8 +111,12 @@ juce::String recordingStatus(const RecordingSession::Snapshot& snapshot, const i
     {
         case RecordingSession::ResultCode::ready: return translation.text(MessageId::Ready);
         case RecordingSession::ResultCode::recording: return translation.text(MessageId::Recording, { { "filename", snapshot.recordingFile.getFileName() } });
+        case RecordingSession::ResultCode::recovering: return translation.text(MessageId::Recovering, { { "filename", snapshot.recordingFile.getFileName() } });
         case RecordingSession::ResultCode::finalizing: return translation.text(MessageId::Finalizing, { { "filename", snapshot.recordingFile.getFileName() } });
-        case RecordingSession::ResultCode::saved: return translation.text(MessageId::Saved, { { "filename", snapshot.recordingFile.getFileName() } });
+        case RecordingSession::ResultCode::saved:
+            return snapshot.hasRecordingErrors
+                ? translation.text(MessageId::SavedWithErrors, { { "filename", snapshot.recordingFile.getFileName() }, { "path", snapshot.logFile.getFullPathName() } })
+                : translation.text(MessageId::Saved, { { "filename", snapshot.recordingFile.getFileName() } });
         case RecordingSession::ResultCode::none: return resultMessage(snapshot.error, translation);
         case RecordingSession::ResultCode::failed:
         {
@@ -120,6 +124,9 @@ juce::String recordingStatus(const RecordingSession::Snapshot& snapshot, const i
             juce::String reason = "writer", outcome = "writerFailed";
             switch (snapshot.failureReason)
             {
+                case RecordingSession::FailureReason::log:
+                    return withDiskDiagnostic(translation.text(MessageId::RecordingLogFailed, { { "path", snapshot.recordingFile.getFullPathName() },
+                        { "log", snapshot.logFile.getFullPathName() } }), snapshot.error, translation);
                 case RecordingSession::FailureReason::inputLost: reason = "inputLost"; break;
                 case RecordingSession::FailureReason::discontinuity: reason = "discontinuity"; break;
                 case RecordingSession::FailureReason::overflow: reason = "overflow"; break;

@@ -159,8 +159,9 @@ void metersAndSavesSelectedStereoInOrder()
 struct DiskControl
 {
     std::atomic<bool> failWrites { false }, failMetadata { false }, corruptMetadata { false };
+    std::atomic<size_t> partialFailureBytes { 0 };
     std::atomic<juce::int64> flushedBytes { 0 };
-    std::atomic<bool> failNextFlush { false };
+    std::atomic<bool> failNextFlush { false }, failFlushes { false };
     std::mutex mutex;
     std::condition_variable changed;
     bool blockFinalization = false, enteredFinalization = false, release = false;
@@ -172,7 +173,7 @@ public:
         : output(std::move(outputIn)), control(std::move(controlIn)) {}
     void flush() override
     {
-        if (control->failNextFlush.exchange(false)) throw std::runtime_error("disk flush refused");
+        if (control->failNextFlush.exchange(false) || control->failFlushes) throw std::runtime_error("disk flush refused");
         output->flush();
         control->flushedBytes = output->getPosition();
         control->changed.notify_all();
@@ -193,6 +194,11 @@ public:
     bool write(const void* data, size_t bytes) override
     {
         if (control->failWrites) return false;
+        if (const auto partial = control->partialFailureBytes.exchange(0))
+        {
+            output->write(data, std::min(bytes, partial));
+            return false;
+        }
         if (control->corruptMetadata && output->getPosition() == 8 && bytes == 34)
         {
             // FLAC STREAMINFO starts at byte 8. Its channel count is stored in byte 12, bits 1..3.
@@ -208,7 +214,12 @@ private:
 };
 qfr::RecordingSession::Options diskOptions(std::shared_ptr<DiskControl> control, size_t capacity = 262144)
 {
-    return { capacity, [control](std::unique_ptr<juce::OutputStream> output) { return std::make_unique<ControlledDisk>(std::move(output), control); } };
+    qfr::RecordingSession::Options options { capacity, [control](std::unique_ptr<juce::OutputStream> output) { return std::make_unique<ControlledDisk>(std::move(output), control); } };
+    options.storageRetryInterval = std::chrono::milliseconds(2);
+    options.noProgressTimeout = std::chrono::milliseconds(150);
+    options.callbackTimeout = std::chrono::milliseconds(50);
+    options.recoveryInterval = std::chrono::milliseconds(40);
+    return options;
 }
 void periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive()
 {
@@ -242,7 +253,7 @@ void periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive()
             && decode(outcome.recordingFile)->lengthInSamples == 32768,
             "periodic disk flushing preserves the continuous FLAC and normal stop finalization");
 }
-void periodicDiskFlushFailureStopsAndRetainsAnIncompleteRecording()
+void periodicDiskFlushFailureRecoversAndFinalizes()
 {
     Folder folder;
     auto disk = std::make_shared<DiskControl>();
@@ -256,15 +267,236 @@ void periodicDiskFlushFailureStopsAndRetainsAnIncompleteRecording()
     session.processInput(inputs, 1, 16384);
     disk->failNextFlush = true;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (session.snapshot().controlsLocked() && std::chrono::steady_clock::now() < deadline)
+    while (disk->failNextFlush && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     session.requestStop(); session.waitForStop();
     const auto outcome = session.snapshot();
-    require(outcome.state == qfr::RecordingSession::State::failed && outcome.incomplete
-            && outcome.failureReason == qfr::RecordingSession::FailureReason::diskFlush
-            && outcome.finalization == qfr::RecordingSession::FinalizationOutcome::diskFlushFailed
-            && partial.existsAsFile() && !folder.file.getChildFile("take_01.flac").exists(),
-            "periodic disk flush failure reports the failed flush and retains an unpromoted incomplete recording");
+    require(outcome.state == qfr::RecordingSession::State::succeeded && !outcome.incomplete
+            && outcome.finalization == qfr::RecordingSession::FinalizationOutcome::finalized
+            && !partial.existsAsFile() && decode(outcome.recordingFile)->lengthInSamples == 16384
+            && folder.file.getChildFile("take_01.log").loadFileAsString().contains("disk flush refused"),
+            "periodic disk flush retries retain captured audio and report recording errors in the accompanying log");
+}
+void storageRetriesPreserveEncodedBytesAndFinalization()
+{
+    Folder folder;
+    auto disk = std::make_shared<DiskControl>();
+    qfr::RecordingSession session(diskOptions(disk));
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start retried storage recording");
+    disk->partialFailureBytes = 7;
+    disk->failNextFlush = true;
+    std::array<float, 16384> samples;
+    for (size_t i = 0; i < samples.size(); ++i) samples[i] = i % 2 == 0 ? .25f : -.5f;
+    const float* inputs[] { samples.data() };
+    session.processInput(inputs, 1, static_cast<int>(samples.size()));
+    session.requestStop(); session.waitForStop();
+    const auto outcome = session.snapshot();
+    require(outcome.state == qfr::RecordingSession::State::succeeded && !outcome.incomplete,
+        "partial encoded writes and transient flush failures recover before the encoder becomes fatal");
+    auto reader = decode(outcome.recordingFile);
+    require(reader->lengthInSamples == 16384, "retry preserves the full audio length without duplicating bytes");
+    juce::AudioBuffer<float> decoded(1, 16384);
+    require(reader->read(&decoded, 0, 16384, 0, true, false), "retry output remains decodable");
+    for (int i = 0; i < 16384; ++i)
+        require(std::abs(decoded.getSample(0, i) - samples[static_cast<size_t>(i)]) < 1.f / 32768.f,
+            "retried encoded bytes preserve every known sample");
+    const auto log = folder.file.getChildFile("take_01.log").loadFileAsString();
+    require(log.contains("retry 1/3") && log.contains("disk flush refused") && log.contains("succeeded"),
+        "storage retry history retains the original diagnostic and outcome");
+}
+void compatibleInputRecoveryKeepsTheRecordingAndResetsOnSavedAudio()
+{
+    Folder folder;
+    qfr::RecordingSession session;
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start compatible input recovery");
+    const auto file = session.snapshot().recordingFile;
+    std::array<float, 512> samples; samples.fill(.25f);
+    const float* inputs[] { samples.data() };
+    session.processInput(inputs, 1, 512);
+    session.inputLost();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    bool requested = false;
+    while (!(requested = session.takeInputRecoveryRequest()) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(requested && session.snapshot().controlsLocked(), "input interruption requests immediate selected-device recovery");
+    session.inputFormatChanged(48000, 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    require(session.snapshot().recoveryAttempts == 1, "opening compatible input alone does not reset the recovery allowance");
+    session.processInput(inputs, 1, 512);
+    const auto saved = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (session.snapshot().recoveryAttempts != 0 && std::chrono::steady_clock::now() < saved)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(session.snapshot().recoveryAttempts == 0 && session.snapshot().recordingFile == file,
+        "new valid audio saved by the writer recovers the same file and resets interruption attempts");
+    session.requestStop(); session.waitForStop();
+    const auto outcome = session.snapshot();
+    require(!outcome.incomplete && decode(outcome.recordingFile)->lengthInSamples == 1024
+        && outcome.elapsedSeconds >= .03, "compatible reopening preserves both audio blocks and includes the recording gap in the timer");
+    require(folder.file.getChildFile("take_01.log").loadFileAsString().contains("Recovery succeeded"),
+        "recording log records successful capture recovery");
+}
+void changedInputRateRollsOverAutomaticallyWithLinkedLogs()
+{
+    Folder folder;
+    qfr::RecordingSession session;
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start rate-change recording");
+    std::array<float, 512> oldAudio; oldAudio.fill(.25f);
+    std::array<float, 512> newAudio; newAudio.fill(-.5f);
+    const float* oldInput[] { oldAudio.data() };
+    const float* newInput[] { newAudio.data() };
+    session.processInput(oldInput, 1, 512);
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    session.inputFormatChanged(44100, 1);
+    session.processInput(newInput, 1, 512);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (session.snapshot().recordingFile.getFileName() != "take_02.partial.flac"
+        && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    const auto next = session.snapshot();
+    require(next.recordingFile.getFileName() == "take_02.partial.flac" && next.inputStreamRate == 44100
+        && next.elapsedSeconds < .04, "incompatible rate automatically starts next counter and resets its timer");
+    session.processInput(newInput, 1, 512);
+    session.requestStop(); session.waitForStop();
+    const auto oldFile = folder.file.getChildFile("take_01.flac"), newFile = folder.file.getChildFile("take_02.flac");
+    require(decode(oldFile)->sampleRate == 48000 && decode(oldFile)->lengthInSamples == 512
+        && decode(newFile)->sampleRate == 44100 && decode(newFile)->lengthInSamples == 512,
+        "rollover never appends new-rate audio to old-rate FLAC and preserves actual rates without resampling");
+    const auto oldLog = folder.file.getChildFile("take_01.log").loadFileAsString();
+    const auto newLog = folder.file.getChildFile("take_02.log").loadFileAsString();
+    require(oldLog.contains("take_02") && newLog.contains("take_01") && oldLog.contains("48000")
+        && newLog.contains("44100"), "both rollover recordings have linked logs with the rate change");
+}
+void cleanRecordingsAndLogCollisionsPreserveExistingFiles()
+{
+    Folder folder;
+    qfr::RecordingSession session;
+    require(folder.file.getChildFile("take_01.log").replaceWithText("existing log"), "seed leftover recording log");
+    require(session.configure(config(folder)).wasOk() && session.snapshot().nextFile.getFileName() == "take_02.flac"
+        && session.start().wasOk(), "leftover logs occupy their counters");
+    session.requestStop(); session.waitForStop();
+    require(!folder.file.getChildFile("take_02.log").exists() && !session.snapshot().hasRecordingErrors,
+        "clean recordings create only FLAC");
+    require(session.start().wasOk(), "start log-collision recording");
+    const auto occupied = folder.file.getChildFile("take_03.log");
+    require(occupied.replaceWithText("created concurrently"), "occupy log after audio reservation");
+    session.inputDiscontinuity(); session.waitForStop();
+    require(session.snapshot().state == qfr::RecordingSession::State::failed
+        && session.snapshot().failureReason == qfr::RecordingSession::FailureReason::log
+        && occupied.loadFileAsString() == "created concurrently" && !session.takeInputRecoveryRequest(),
+        "required log collision stops capture, preserves the existing log, and prevents restarting");
+}
+void requiredLogAppendFailuresStopEvenDuringFinalization()
+{
+    Folder folder;
+    std::atomic<int> writes { 0 };
+    qfr::RecordingSession::Options options;
+    options.nativeError = [&](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+    {
+        if (operation == qfr::DiskOperation::write && file.hasFileExtension("log") && ++writes >= 2)
+        {
+           #if JUCE_WINDOWS
+            return ERROR_DISK_FULL;
+           #else
+            return ENOSPC;
+           #endif
+        }
+        return 0;
+    };
+    qfr::RecordingSession session(options);
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start log append failure");
+    session.inputDiscontinuity();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (writes == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    session.requestStop(); session.waitForStop();
+    require(session.snapshot().state == qfr::RecordingSession::State::failed
+        && session.snapshot().failureReason == qfr::RecordingSession::FailureReason::log
+        && session.snapshot().error.disk.operation == qfr::DiskOperation::write,
+        "required log append failure preserves native disk detail and cannot report successful saving");
+}
+void captureRecoveryHonorsAttemptAndDeadlineLimits()
+{
+    for (const bool failedOpen : { true, false })
+    {
+        Folder folder;
+        qfr::RecordingSession::Options options;
+        options.callbackTimeout = std::chrono::milliseconds(10);
+        options.recoveryInterval = std::chrono::milliseconds(failedOpen ? 25 : 100);
+        options.noProgressTimeout = std::chrono::milliseconds(failedOpen ? 200 : 60);
+        qfr::RecordingSession session(options);
+        require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start missing-callback recovery limits");
+        unsigned attempts = 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (session.snapshot().controlsLocked() && std::chrono::steady_clock::now() < deadline)
+        {
+            if (session.takeInputRecoveryRequest())
+            {
+                ++attempts;
+                session.inputRecoveryFinished(failedOpen ? qfr::RecorderResult { qfr::ErrorCode::deviceUnavailable, "original native input failure" } : qfr::RecorderResult());
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        session.waitForStop();
+        require(attempts == (failedOpen ? 3u : 1u) && session.snapshot().state == qfr::RecordingSession::State::failed
+            && !session.snapshot().incomplete && !session.takeInputRecoveryRequest(),
+            "missing callbacks stop after three failed selected-device attempts or the no-progress deadline, whichever comes first");
+        require(folder.file.getChildFile("take_01.log").loadFileAsString().contains("Valid input callbacks disappeared"),
+            "missing callbacks are detected and logged without an explicit driver error");
+    }
+}
+void storageRecoveryHonorsThreeRetriesAndTheNoProgressDeadline()
+{
+    for (const bool shortDeadline : { false, true })
+    {
+        Folder folder;
+        std::atomic<bool> armed { false };
+        std::atomic<int> writes { 0 };
+        qfr::RecordingSession::Options options;
+        options.storageRetryInterval = std::chrono::milliseconds(shortDeadline ? 100 : 2);
+        options.noProgressTimeout = std::chrono::milliseconds(shortDeadline ? 20 : 500);
+        options.nativeError = [&](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+        {
+            if (!armed || operation != qfr::DiskOperation::write || !file.getFileName().endsWith(".partial.flac")) return 0;
+            ++writes;
+           #if JUCE_WINDOWS
+            return ERROR_DISK_FULL;
+           #else
+            return ENOSPC;
+           #endif
+        };
+        qfr::RecordingSession session(options);
+        require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start bounded storage retries");
+        armed = true;
+        std::array<float, 16384> samples; samples.fill(.25f);
+        const float* inputs[] { samples.data() };
+        session.processInput(inputs, 1, 16384);
+        session.requestStop(); session.waitForStop();
+        require(writes == (shortDeadline ? 1 : 4) && session.snapshot().state == qfr::RecordingSession::State::failed
+            && session.snapshot().incomplete && session.snapshot().error.disk.operation == qfr::DiskOperation::write,
+            "native storage failure allows three retries after the trigger, with the deadline stopping unfinished retries");
+    }
+}
+void stopCancelsRolloverWhileThePriorFileFinishes()
+{
+    Folder folder;
+    auto disk = std::make_shared<DiskControl>(); disk->blockFinalization = true;
+    qfr::RecordingSession session(diskOptions(disk));
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start Stop during rollover");
+    session.inputFormatChanged(44100, 1);
+    bool entered = false;
+    {
+        std::unique_lock lock(disk->mutex);
+        entered = disk->changed.wait_for(lock, std::chrono::seconds(2), [&] { return disk->enteredFinalization; });
+    }
+    session.requestStop();
+    {
+        std::lock_guard lock(disk->mutex); disk->release = true;
+    }
+    disk->changed.notify_all(); session.waitForStop();
+    session.inputFormatChanged(32000, 1);
+    require(entered && !session.snapshot().controlsLocked() && !session.takeInputRecoveryRequest()
+        && !folder.file.getChildFile("take_02.partial.flac").exists() && !folder.file.getChildFile("take_02.flac").exists(),
+        "Stop during rollover prevents any later automatic file start or device recovery");
 }
 void failedInputPreservesFinalizableAudioAndReportsIncompleteFinalization()
 {
@@ -307,7 +539,7 @@ void failedInputPreservesFinalizableAudioAndReportsIncompleteFinalization()
             && outcome.recordingFile.getFileName() == "take_03.partial.flac" && !folder.file.getChildFile("take_03.flac").exists(),
             "metadata validation failure after input loss cannot promote an invalid FLAC");
 }
-void driverDiscontinuityFailsTheTakeAndPreservesAcceptedAudio()
+void driverDiscontinuityContinuesTheRecordingAndLogsMissingAudio()
 {
     Folder folder;
     qfr::RecordingSession session;
@@ -320,15 +552,20 @@ void driverDiscontinuityFailsTheTakeAndPreservesAcceptedAudio()
     const float* inputs[] { source.data() };
     session.processInput(inputs, 1, 512);
     session.inputDiscontinuity();
+    session.inputDiscontinuity();
     session.processInput(inputs, 1, 512);
     session.requestStop(); session.waitForStop();
     const auto outcome = session.snapshot();
-    require(outcome.state == qfr::RecordingSession::State::failed && !outcome.incomplete
+    require(outcome.state == qfr::RecordingSession::State::succeeded && !outcome.incomplete
             && outcome.failureReason == qfr::RecordingSession::FailureReason::discontinuity
             && outcome.finalization == qfr::RecordingSession::FinalizationOutcome::finalized,
-            "driver missing samples report a specific failed take with finalized captured audio");
-    require(decode(outcome.recordingFile)->lengthInSamples == 512,
-            "discontinuity drains accepted frames and rejects later potentially discontinuous audio");
+            "driver missing samples retain a finalized recording with recording errors");
+    require(decode(outcome.recordingFile)->lengthInSamples == 1024,
+            "missing samples are omitted while later valid audio continues in the same FLAC");
+    const auto log = folder.file.getChildFile("take_01.log").loadFileAsString();
+    require(log.contains("Missing input samples") && log.contains("count=2")
+            && log.contains("duration unknown") && log.contains("position="),
+            "repeated driver errors produce grouped timestamped gap history without invented sample counts");
 }
 void inputInterruptionAndFinalFlushFailureRemainSeparate()
 {
@@ -337,8 +574,8 @@ void inputInterruptionAndFinalFlushFailureRemainSeparate()
     qfr::RecordingSession session(diskOptions(disk));
     require(session.configure(config(folder, juce::String::fromUTF8("录音{path}"))).wasOk() && session.start().wasOk(), "start compound flush failure");
     const auto partial = session.snapshot().recordingFile;
-    disk->failNextFlush = true;
-    session.inputDiscontinuity(); session.waitForStop();
+    disk->failFlushes = true;
+    session.inputDiscontinuity(); session.requestStop(); session.waitForStop();
     const auto outcome = session.snapshot();
     require(outcome.state == qfr::RecordingSession::State::failed && outcome.incomplete && outcome.recordingFile == partial
         && outcome.failureReason == qfr::RecordingSession::FailureReason::discontinuity
@@ -385,7 +622,7 @@ void finalizationLocksAnotherTakeAndPromotionDoesNotReplace()
     require(folder.file.getChildFile("take_01.flac").loadFileAsString() == "existing final recording", "promotion never replaces existing final recording");
     require(decode(state.recordingFile)->lengthInSamples == 0, "finalized partial is inspectable after promotion conflict");
 }
-void overflowAndWriterFailuresStopWithoutClaimingSuccess()
+void overflowOmitsMissingAudioAndWriterFailureRetainsThePartial()
 {
     Folder folder;
     qfr::RecordingSession session({ 512, {} });
@@ -395,10 +632,13 @@ void overflowAndWriterFailuresStopWithoutClaimingSuccess()
     session.processInput(inputs, 1, 256);
     session.processInput(inputs, 1, 1024);
     session.processInput(inputs, 1, 256);
-    session.waitForStop();
+    session.requestStop(); session.waitForStop();
     auto state = session.snapshot();
-    require(state.state == qfr::RecordingSession::State::failed && state.failureReason == qfr::RecordingSession::FailureReason::overflow, "buffer overflow stops and reports failed capture");
-    require(!state.incomplete && decode(state.recordingFile)->lengthInSamples == 256, "overflow preserves accepted frames and does not silently accept subsequent input");
+    require(state.state == qfr::RecordingSession::State::succeeded && state.failureReason == qfr::RecordingSession::FailureReason::overflow
+        && state.hasRecordingErrors, "buffer overflow continues with recording errors");
+    require(!state.incomplete && decode(state.recordingFile)->lengthInSamples == 512
+        && folder.file.getChildFile("take_01.log").loadFileAsString().contains("omitted frames=1024"),
+        "overflow omits missing frames, documents the gap, and preserves subsequent valid input");
     auto disk = std::make_shared<DiskControl>();
     qfr::RecordingSession broken(diskOptions(disk));
     require(broken.configure(config(folder, "writer")).wasOk() && broken.start().wasOk(), "start controlled writer-failure recording");
@@ -484,6 +724,10 @@ void nativeDiskFailuresPreserveFirstDiagnosticAndRecordingOutcomes()
         Folder folder;
         std::atomic<bool> armed { false }, injected { false };
         qfr::RecordingSession::Options options;
+        options.noProgressTimeout = std::chrono::milliseconds(100);
+        options.callbackTimeout = std::chrono::milliseconds(20);
+        options.recoveryInterval = std::chrono::milliseconds(25);
+        options.storageRetryInterval = std::chrono::milliseconds(2);
         options.nativeError = [&](qfr::DiskOperation current, const juce::File& file) -> uint64_t
         {
             if (!armed || !file.getFileName().endsWith(".partial.flac")) return 0;
@@ -536,6 +780,10 @@ void passiveReadinessPreservesSuccessfulAndFailedTakeOutcomes()
         Folder folder;
         std::atomic<bool> armed { false };
         qfr::RecordingSession::Options options;
+        options.noProgressTimeout = std::chrono::milliseconds(100);
+        options.callbackTimeout = std::chrono::milliseconds(20);
+        options.recoveryInterval = std::chrono::milliseconds(25);
+        options.storageRetryInterval = std::chrono::milliseconds(2);
         options.nativeError = [&](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
         {
             if (!armed || operation != qfr::DiskOperation::flush || !file.getFileName().endsWith(".partial.flac")) return 0;
@@ -655,6 +903,45 @@ int main(int argc, char** argv)
 {
     try
     {
+        if (argc == 2 && juce::String(argv[1]) == "--limits-only")
+        {
+            captureRecoveryHonorsAttemptAndDeadlineLimits();
+            storageRecoveryHonorsThreeRetriesAndTheNoProgressDeadline();
+            stopCancelsRolloverWhileThePriorFileFinishes();
+            std::cout << "PASS recovery limits and Stop cancellation\n";
+            return 0;
+        }
+        if (argc == 2 && juce::String(argv[1]) == "--logs-only")
+        {
+            cleanRecordingsAndLogCollisionsPreserveExistingFiles();
+            requiredLogAppendFailuresStopEvenDuringFinalization();
+            std::cout << "PASS clean recordings and exclusive recording logs\n";
+            return 0;
+        }
+        if (argc == 2 && juce::String(argv[1]) == "--rollover-only")
+        {
+            changedInputRateRollsOverAutomaticallyWithLinkedLogs();
+            std::cout << "PASS rate-change rollover and linked recording logs\n";
+            return 0;
+        }
+        if (argc == 2 && juce::String(argv[1]) == "--input-recovery-only")
+        {
+            compatibleInputRecoveryKeepsTheRecordingAndResetsOnSavedAudio();
+            std::cout << "PASS compatible input recovery\n";
+            return 0;
+        }
+        if (argc == 2 && juce::String(argv[1]) == "--storage-only")
+        {
+            storageRetriesPreserveEncodedBytesAndFinalization();
+            std::cout << "PASS storage retries and partial-write integrity\n";
+            return 0;
+        }
+        if (argc == 2 && juce::String(argv[1]) == "--gaps-only")
+        {
+            driverDiscontinuityContinuesTheRecordingAndLogsMissingAudio();
+            std::cout << "PASS missing samples continue with recording log\n";
+            return 0;
+        }
         if (argc == 2 && juce::String(argv[1]) == "--promotion-only")
         {
             previewUsesHighestOccupiedCounter();
@@ -668,6 +955,15 @@ int main(int argc, char** argv)
         }
         previewUsesHighestOccupiedCounter();
         std::cout << "PASS filename preview\n";
+        storageRetriesPreserveEncodedBytesAndFinalization();
+        compatibleInputRecoveryKeepsTheRecordingAndResetsOnSavedAudio();
+        changedInputRateRollsOverAutomaticallyWithLinkedLogs();
+        cleanRecordingsAndLogCollisionsPreserveExistingFiles();
+        requiredLogAppendFailuresStopEvenDuringFinalization();
+        captureRecoveryHonorsAttemptAndDeadlineLimits();
+        storageRecoveryHonorsThreeRetriesAndTheNoProgressDeadline();
+        stopCancelsRolloverWhileThePriorFileFinishes();
+        std::cout << "PASS recovery, retry integrity, rollover, required logs, deadlines, and Stop cancellation\n";
         rejectsUnsafeConfigurations();
         std::cout << "PASS configuration validation\n";
         savesSelectedMonoAndDrainsBeforePromotion();
@@ -676,16 +972,16 @@ int main(int argc, char** argv)
         std::cout << "PASS selected stereo and idle/active meters\n";
         periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive();
         std::cout << "PASS periodic disk flush and growing active partial audio\n";
-        periodicDiskFlushFailureStopsAndRetainsAnIncompleteRecording();
-        std::cout << "PASS periodic disk flush failure and incomplete retention\n";
+        periodicDiskFlushFailureRecoversAndFinalizes();
+        std::cout << "PASS periodic disk flush recovery and error log\n";
         failedInputPreservesFinalizableAudioAndReportsIncompleteFinalization();
         std::cout << "PASS input loss and incomplete finalization\n";
-        driverDiscontinuityFailsTheTakeAndPreservesAcceptedAudio();
+        driverDiscontinuityContinuesTheRecordingAndLogsMissingAudio();
         inputInterruptionAndFinalFlushFailureRemainSeparate();
         std::cout << "PASS driver discontinuity and preserved audio\n";
         finalizationLocksAnotherTakeAndPromotionDoesNotReplace();
         std::cout << "PASS finalization locks and promotion conflict\n";
-        overflowAndWriterFailuresStopWithoutClaimingSuccess();
+        overflowOmitsMissingAudioAndWriterFailureRetainsThePartial();
         std::cout << "PASS bounded capture overflow and disk writer failure\n";
         concurrentReservationRechecksChangedFolderContents();
         std::cout << "PASS concurrent reservation and stale preview\n";

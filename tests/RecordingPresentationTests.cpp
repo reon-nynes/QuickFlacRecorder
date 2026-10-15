@@ -102,9 +102,38 @@ void nativeDiskMessagesPreserveOperationDiagnosticsAndActualRecordingPath()
             "disk operation is translated independently of original native diagnostic");
     }
 }
+void recoveryAndLoggedOutcomesKeepTheirLocalizedMeaning()
+{
+    const qfr::i18n::Translation english({ "en" }), chinese({ "zh-Hans" });
+    qfr::RecordingSession::Snapshot snapshot;
+    snapshot.state = qfr::RecordingSession::State::recovering;
+    snapshot.resultCode = qfr::RecordingSession::ResultCode::recovering;
+    snapshot.recordingFile = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("take_01.flac");
+    snapshot.logFile = snapshot.recordingFile.withFileExtension(".log");
+    require(snapshot.controlsLocked() && qfr::recordingAction(snapshot.state) == qfr::RecordingAction::stop
+        && qfr::recordingStatus(snapshot, english).contains("Recovering")
+        && containsExact(qfr::recordingStatus(snapshot, chinese), juce::String::fromUTF8("正在恢复录音")),
+        "recovery keeps Stop and translates status in both interface languages");
+    snapshot.state = qfr::RecordingSession::State::succeeded;
+    snapshot.resultCode = qfr::RecordingSession::ResultCode::saved;
+    snapshot.hasRecordingErrors = true;
+    require(qfr::recordingStatus(snapshot, english).contains("Saved with recording errors")
+        && containsExact(qfr::recordingStatus(snapshot, chinese), juce::String::fromUTF8("录音期间发生错误")),
+        "finalized audio with gaps uses a distinct localized saved-with-errors outcome");
+    for (const auto* translation : { &english, &chinese })
+        require(containsExact(qfr::recordingStatus(snapshot, *translation), snapshot.logFile.getFullPathName()),
+            "saved-with-errors status identifies the stable accompanying log path");
+    snapshot.state = qfr::RecordingSession::State::failed;
+    snapshot.resultCode = qfr::RecordingSession::ResultCode::failed;
+    snapshot.failureReason = qfr::RecordingSession::FailureReason::log;
+    for (const auto* translation : { &english, &chinese })
+        require(containsExact(qfr::recordingStatus(snapshot, *translation), snapshot.logFile.getFullPathName())
+            && containsExact(qfr::recordingStatus(snapshot, *translation), snapshot.recordingFile.getFullPathName()),
+            "failed required log reports both the attempted log and retained audio paths");
+}
 }
 int main()
 {
-    try { recordsStructuredSuccessAndFormatsInPresentation(); translatesValidationAndPreservesUserData(); formatsCompoundFailuresCountsAndEnglishFallback(); nativeDiskMessagesPreserveOperationDiagnosticsAndActualRecordingPath(); std::cout << "PASS recording presentation\n"; return 0; }
+    try { recordsStructuredSuccessAndFormatsInPresentation(); translatesValidationAndPreservesUserData(); formatsCompoundFailuresCountsAndEnglishFallback(); nativeDiskMessagesPreserveOperationDiagnosticsAndActualRecordingPath(); recoveryAndLoggedOutcomesKeepTheirLocalizedMeaning(); std::cout << "PASS recording presentation\n"; return 0; }
     catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
 }

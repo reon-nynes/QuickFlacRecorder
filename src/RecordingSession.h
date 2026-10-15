@@ -13,9 +13,9 @@ namespace qfr
 class RecordingSession final
 {
 public:
-    enum class State { idle, recording, finalizing, succeeded, failed };
-    enum class ResultCode { none, ready, recording, finalizing, saved, failed };
-    enum class FailureReason { none, inputLost, discontinuity, overflow, writer, diskFlush, promotion, start };
+    enum class State { idle, recording, recovering, finalizing, succeeded, failed };
+    enum class ResultCode { none, ready, recording, recovering, finalizing, saved, failed };
+    enum class FailureReason { none, inputLost, discontinuity, overflow, writer, diskFlush, promotion, start, log };
     enum class FinalizationOutcome { none, finalized, writerFailed, diskFlushFailed, promotionFailed };
 
     struct Configuration
@@ -38,6 +38,10 @@ public:
         // platform error simulates its failure. Close always releases the handle.
         // Called only on control/writer threads, never from an audio callback.
         std::function<uint64_t(DiskOperation, const juce::File&)> nativeError;
+        std::chrono::milliseconds storageRetryInterval { 1000 };
+        std::chrono::milliseconds noProgressTimeout { 10000 };
+        std::chrono::milliseconds callbackTimeout { 1000 };
+        std::chrono::milliseconds recoveryInterval { 3000 };
     };
 
     struct Snapshot
@@ -54,7 +58,11 @@ public:
         double elapsedSeconds = 0;
         double inputStreamRate = 0;
         int outputChannels = 1;
-        bool controlsLocked() const noexcept { return state == State::recording || state == State::finalizing; }
+        int leftInputChannel = 0, rightInputChannel = -1;
+        juce::File logFile;
+        bool hasRecordingErrors = false;
+        unsigned recoveryAttempts = 0;
+        bool controlsLocked() const noexcept { return state == State::recording || state == State::recovering || state == State::finalizing; }
     };
 
     struct Levels
@@ -79,12 +87,15 @@ public:
     Snapshot snapshot() const;
     Levels readLevels() noexcept;
     void retainInputDiagnostic(const juce::String&); // Control thread, after polling the native input boundary.
+    bool takeInputRecoveryRequest(); // Control thread. Reopen only the originally selected input.
+    void inputRecoveryFinished(const RecorderResult&);
+    void inputFormatChanged(double inputStreamRate, int availableInputChannels) noexcept;
 
     // Exactly one audio producer. No allocation, filesystem I/O, encoding, or blocking locks.
     // Call while idle as well, for selected-channel metering.
     void processInput(const float* const* inputs, int inputChannels, int frames) noexcept;
     void inputLost() noexcept; // Safe from an input-device callback; preserves queued captured audio.
-    void inputDiscontinuity() noexcept; // Report driver overruns/missing samples without claiming input loss.
+    void inputDiscontinuity(uint64_t count = 1) noexcept; // Xrun occurrences, never an exact lost-sample count.
 
 private:
     struct Impl;

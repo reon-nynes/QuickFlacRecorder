@@ -135,6 +135,7 @@ void nativeFailureAndRecoveryEvidence(const juce::File& root, const juce::File& 
     // A real Windows input and the production writer use a controlled disk boundary.
     qfr::RecordingSession::Options diskOptions;
     diskOptions.diskFlushInterval = std::chrono::milliseconds(20);
+    diskOptions.storageRetryInterval = std::chrono::milliseconds(10);
     class RefusedFlush final : public juce::OutputStream
     {
     public:
@@ -461,6 +462,35 @@ void nativeTerminalReadiness(const juce::File& root, const juce::File& evidence,
         recorder.removeFromDesktop();
     }
 }
+void nativeCompatibleInputRecovery(const juce::File& root)
+{
+    qfr::RecordingSession session;
+    qfr::InputController input(session);
+    const auto driver = input.defaultDriver(), device = input.defaultDevice(driver);
+    require(input.open(driver, device).wasOk(), "open the actual selected Windows input for recovery");
+    require(session.configure({ root, "native-recovery", input.sampleRate(), 0, -1 }).wasOk() && session.start().wasOk(),
+        "start native compatible recovery recording");
+    const auto file = session.snapshot().recordingFile;
+    juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+    input.audioDeviceError("Controlled native input interruption {detail}");
+    input.close();
+    const auto deadline = juce::Time::getMillisecondCounterHiRes() + 3000;
+    bool recovered = false;
+    while (juce::Time::getMillisecondCounterHiRes() < deadline)
+    {
+        input.pollError();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
+        if (input.isAvailable() && session.snapshot().recoveryAttempts == 0) { recovered = true; break; }
+    }
+    session.requestStop(); input.close(); session.waitForStop();
+    const auto result = session.snapshot();
+    require(recovered && input.driver() == driver && input.inputDevice() == device
+        && result.recordingFile == file.getSiblingFile("native-recovery_01.flac") && !result.incomplete
+        && result.inputDetail == "Controlled native input interruption {detail}"
+        && result.logFile.loadFileAsString().contains("Recovery succeeded"),
+        "production input control reopens the same native input and continues the same FLAC with original diagnostic");
+    std::cout << "PASS native compatible input recovery: " << driver << ", " << device << ", " << result.inputStreamRate << " Hz\n";
+}
 }
 int main(int argc, char** argv)
 {
@@ -484,6 +514,7 @@ int main(int argc, char** argv)
         iconsDoNotUseCaptions(evidence);
         inputResultsDoNotDependOnLanguage();
         std::cout << "PASS bilingual controls, native identities, and caption-independent icons\n";
+        if (args.contains("--native-fault-recovery")) nativeCompatibleInputRecovery(root);
         if (args.contains("--native-incomplete"))
         {
             nativeIncompleteWarnings(root, qfr::i18n::Translation({ "en" }));

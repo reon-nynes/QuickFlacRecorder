@@ -47,3 +47,19 @@ _Avoid_: Guaranteed hardware-native rate
 **Incomplete recording**:
 A captured take that has not successfully finished saving and still carries a .partial.flac name.
 _Avoid_: Saved recording, recovered recording
+
+**Recording interruption**:
+A period when a recording cannot capture or save incoming audio and needs recovery before it can continue.
+_Avoid_: Warning, stopped recording
+
+**Recording gap**:
+An interval of missing input audio within a recording, documented separately from the audio that was saved.
+_Avoid_: Silence, complete audio
+
+**Recording log**:
+A file accompanying a recording that documents its errors, recording gaps, recovery attempts, and outcomes.
+_Avoid_: Application log, crash report
+
+**Recording rollover**:
+An automatic transition from the current recording to a new recording with the next counter after an input-device change prevents continuing the current FLAC.
+_Avoid_: Resampling, appending a different format
