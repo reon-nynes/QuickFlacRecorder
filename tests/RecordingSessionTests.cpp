@@ -324,6 +324,7 @@ void compatibleInputRecoveryKeepsTheRecordingAndResetsOnSavedAudio()
     require(session.snapshot().inputDetail == "native input error after a sample-loss warning",
         "earlier sample loss cannot suppress a later native input diagnostic");
     session.inputFormatChanged(48000, 1);
+    session.inputRecoveryFinished({});
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     require(session.snapshot().recoveryAttempts == 1, "opening compatible input alone does not reset the recovery allowance");
     session.processInput(inputs, 1, 512);
@@ -557,6 +558,227 @@ void headerAndRequiredLogFailuresPreserveBothNativeDiagnostics()
             && result.error.disk.nativeCode != result.logError.disk.nativeCode,
             "startup and rollover preserve the first native disk error and report a required-log failure with the retained partial");
     }
+}
+bool waitForInputRecovery(qfr::RecordingSession& session)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (session.snapshot().controlsLocked() && std::chrono::steady_clock::now() < deadline)
+    {
+        if (session.takeInputRecoveryRequest()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return false;
+}
+int logEventCount(const juce::String& log, const juce::String& message)
+{
+    int count = 0;
+    for (const auto& line : juce::StringArray::fromLines(log))
+        if (line.contains(message)) ++count;
+    return count;
+}
+void pendingInputRecoveryDoesNotConsumeAttempts()
+{
+    Folder folder;
+    qfr::RecordingSession::Options options;
+    options.callbackTimeout = std::chrono::seconds(5);
+    options.recoveryInterval = std::chrono::milliseconds(25);
+    options.noProgressTimeout = std::chrono::seconds(2);
+    qfr::RecordingSession session(options);
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start pending input recovery");
+    session.inputLost();
+    const auto logFile = folder.file.getChildFile("take_01.log");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!logFile.loadFileAsString().contains("recording gap begins") && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(logFile.loadFileAsString().contains("recording gap begins"), "writer observes the input interruption");
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    require(session.snapshot().recoveryAttempts == 0 && session.snapshot().controlsLocked()
+        && !logFile.loadFileAsString().contains("Input recovery attempt"),
+        "scheduled requests awaiting the control thread do not count or log attempts that never ran");
+    require(session.takeInputRecoveryRequest() && session.snapshot().recoveryAttempts == 1,
+        "servicing the pending request starts exactly one recovery attempt");
+    session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "first pending reopen failed" });
+    session.requestStop(); session.waitForStop();
+    require(!session.takeInputRecoveryRequest() && decode(session.snapshot().recordingFile)->lengthInSamples == 0,
+        "Stop cancels pending recovery and finalizes the real temporary FLAC");
+}
+void slowInputReopenConsumesOnlyItsActualFailure()
+{
+    Folder folder;
+    qfr::RecordingSession::Options options;
+    options.callbackTimeout = std::chrono::seconds(5);
+    options.recoveryInterval = std::chrono::milliseconds(25);
+    options.noProgressTimeout = std::chrono::seconds(2);
+    qfr::RecordingSession session(options);
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start slow input reopen");
+    session.inputLost();
+    require(waitForInputRecovery(session), "service the first input recovery request");
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    require(session.snapshot().recoveryAttempts == 1 && !session.takeInputRecoveryRequest(),
+        "a slow reopen remains the only attempt across multiple scheduled retry times");
+    session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "slow first reopen failed" });
+    const auto logFile = folder.file.getChildFile("take_01.log");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!logFile.loadFileAsString().contains("Selected input recovery attempt failed")
+        && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(session.snapshot().controlsLocked() && session.snapshot().recoveryAttempts == 1
+        && logEventCount(logFile.loadFileAsString(), "Selected input recovery attempt failed") == 1,
+        "one slow failed reopen leaves two actual failures available before the deadline");
+    for (unsigned attempt = 2; attempt <= 3; ++attempt)
+    {
+        require(waitForInputRecovery(session) && session.snapshot().recoveryAttempts == attempt,
+            "each subsequent serviced request counts exactly once");
+        session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "subsequent reopen failed" });
+    }
+    const auto stopped = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (session.snapshot().controlsLocked() && std::chrono::steady_clock::now() < stopped)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(session.snapshot().state == qfr::RecordingSession::State::failed, "three actual failed reopens stop capture");
+    session.waitForStop();
+    const auto log = logFile.loadFileAsString();
+    require(logEventCount(log, "Input recovery attempt ") == 3
+        && logEventCount(log, "Selected input recovery attempt failed") == 3
+        && !log.contains("no recording progress") && !session.takeInputRecoveryRequest()
+        && decode(session.snapshot().recordingFile)->lengthInSamples == 0,
+        "recording history contains exactly three actual starts and failures before the no-progress deadline");
+}
+void outstandingInputRecoveryHonorsDeadlineAndStop()
+{
+    for (const bool inFlight : { false, true })
+    for (const bool stop : { false, true })
+    {
+        Folder folder;
+        qfr::RecordingSession::Options options;
+        options.callbackTimeout = std::chrono::seconds(5);
+        options.recoveryInterval = std::chrono::milliseconds(25);
+        options.noProgressTimeout = std::chrono::milliseconds(300);
+        qfr::RecordingSession session(options);
+        require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start outstanding input recovery");
+        const auto began = std::chrono::steady_clock::now();
+        session.inputLost();
+        if (inFlight) require(waitForInputRecovery(session), "hold the selected input reopen in flight");
+        if (stop)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            session.requestStop();
+        }
+        const auto deadline = began + std::chrono::seconds(2);
+        while (session.snapshot().controlsLocked() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        require(!session.snapshot().controlsLocked(), "deadline or Stop terminates an outstanding request without its result");
+        session.waitForStop();
+        const auto outcome = session.snapshot();
+        const auto log = outcome.logFile.loadFileAsString();
+        require(outcome.state == (stop ? qfr::RecordingSession::State::succeeded : qfr::RecordingSession::State::failed)
+            && outcome.recoveryAttempts == (inFlight ? 1u : 0u)
+            && logEventCount(log, "Input recovery attempt ") == (inFlight ? 1 : 0)
+            && !log.contains("Selected input recovery attempt failed")
+            && (stop ? !log.contains("no recording progress") : log.contains("no recording progress"))
+            && (stop || std::chrono::steady_clock::now() - began >= options.noProgressTimeout)
+            && decode(outcome.recordingFile)->lengthInSamples == 0 && !session.takeInputRecoveryRequest(),
+            "outstanding requests do not invent failures or evade the deadline, and Stop cancels recovery");
+        session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "late canceled result" });
+        require(outcome.logFile.loadFileAsString() == log && session.snapshot().recoveryAttempts == outcome.recoveryAttempts,
+            "late recovery completion cannot change a stopped recording or its history");
+    }
+}
+void inputRecoveryFailuresSurviveOpeningAndRollover()
+{
+    Folder folder;
+    qfr::RecordingSession::Options options;
+    options.callbackTimeout = std::chrono::seconds(5);
+    options.recoveryInterval = std::chrono::milliseconds(25);
+    options.noProgressTimeout = std::chrono::seconds(2);
+    qfr::RecordingSession session(options);
+    auto configuration = config(folder);
+    configuration.leftInputChannel = 1; configuration.rightInputChannel = 0;
+    require(session.configure(configuration).wasOk() && session.start().wasOk(), "start stereo recovery across rollover");
+    session.inputLost();
+    require(waitForInputRecovery(session), "start the first failed reopen before rollover");
+    session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "first failure before rollover" });
+    require(waitForInputRecovery(session), "start successful reopen without saved audio");
+    session.inputFormatChanged(44100, 2);
+    session.inputRecoveryFinished({});
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (session.snapshot().recordingFile.getFileName() != "take_02.partial.flac"
+        && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    const auto rolled = session.snapshot();
+    require(rolled.recordingFile.getFileName() == "take_02.partial.flac" && rolled.recoveryAttempts == 2
+        && rolled.leftInputChannel == 1 && rolled.rightInputChannel == 0 && rolled.outputChannels == 2,
+        "opening input and allocating the next recording preserve the allowance and selected stereo pair");
+    require(waitForInputRecovery(session) && session.snapshot().recoveryAttempts == 3, "start second actual failure after rollover");
+    session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "second failure after rollover" });
+    require(waitForInputRecovery(session) && session.snapshot().recoveryAttempts == 4,
+        "a successful reopen does not count as a failure or exhaust the three-failure allowance");
+    session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "third failure after rollover" });
+    const auto stopped = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (session.snapshot().controlsLocked() && std::chrono::steady_clock::now() < stopped)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(session.snapshot().state == qfr::RecordingSession::State::failed,
+        "the third actual failure stops capture across opening and rollover");
+    session.waitForStop();
+    const auto oldFile = folder.file.getChildFile("take_01.flac"), newFile = folder.file.getChildFile("take_02.flac");
+    const auto log = folder.file.getChildFile("take_01.log").loadFileAsString()
+        + folder.file.getChildFile("take_02.log").loadFileAsString();
+    require(decode(oldFile)->sampleRate == 48000 && decode(newFile)->sampleRate == 44100
+        && decode(newFile)->numChannels == 2 && decode(newFile)->lengthInSamples == 0
+        && logEventCount(log, "Input recovery attempt ") == 4
+        && logEventCount(log, "Selected input recovery attempt failed") == 3
+        && !log.contains("Recovery succeeded"),
+        "linked real FLAC recordings log four actual attempts and three failures without a false progress reset");
+}
+void savedAudioResetsActualInputRecoveryFailures()
+{
+    Folder folder;
+    qfr::RecordingSession::Options options;
+    options.callbackTimeout = std::chrono::seconds(5);
+    options.recoveryInterval = std::chrono::milliseconds(25);
+    options.noProgressTimeout = std::chrono::seconds(2);
+    qfr::RecordingSession session(options);
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start saved-audio recovery reset");
+    session.inputLost();
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        require(waitForInputRecovery(session), "service a failure before saved audio");
+        session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "failure before saved audio" });
+    }
+    require(waitForInputRecovery(session), "reopen input after two failures");
+    session.inputFormatChanged(48000, 1);
+    session.inputRecoveryFinished({});
+    session.processInput(nullptr, 0, 512);
+    require(session.snapshot().recoveryAttempts == 3, "invalid incoming audio does not reset the allowance");
+    std::array<float, 512> samples; samples.fill(.25f);
+    const float* inputs[] { samples.data() };
+    session.processInput(inputs, 1, 512);
+    const auto saved = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (session.snapshot().recoveryAttempts != 0 && std::chrono::steady_clock::now() < saved)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(session.snapshot().recoveryAttempts == 0 && session.snapshot().state == qfr::RecordingSession::State::recording,
+        "successfully saving valid audio resets actual attempts and failures");
+    session.inputLost();
+    for (unsigned attempt = 1; attempt <= 3; ++attempt)
+    {
+        require(waitForInputRecovery(session) && session.snapshot().recoveryAttempts == attempt,
+            "a new interruption receives three fresh failed attempts after saved audio");
+        session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "failure after saved audio" });
+    }
+    const auto stopped = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (session.snapshot().controlsLocked() && std::chrono::steady_clock::now() < stopped)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(session.snapshot().state == qfr::RecordingSession::State::failed, "three new failures exhaust the reset allowance");
+    session.waitForStop();
+    const auto outcome = session.snapshot();
+    const auto log = outcome.logFile.loadFileAsString();
+    auto reader = decode(outcome.recordingFile);
+    juce::AudioBuffer<float> decoded(1, 512);
+    require(reader->lengthInSamples == 512 && reader->read(&decoded, 0, 512, 0, true, false)
+        && std::abs(decoded.getSample(0, 0) - .25f) < 1.f / 32768.f
+        && logEventCount(log, "Recovery succeeded") == 1
+        && logEventCount(log, "Input recovery attempt ") == 6
+        && logEventCount(log, "Selected input recovery attempt failed") == 5,
+        "real FLAC and recording log retain saved audio and both interruptions' actual recovery history");
 }
 void captureRecoveryHonorsAttemptAndDeadlineLimits()
 {
@@ -1049,6 +1271,11 @@ int main(int argc, char** argv)
     {
         if (argc == 2 && juce::String(argv[1]) == "--limits-only")
         {
+            slowInputReopenConsumesOnlyItsActualFailure();
+            pendingInputRecoveryDoesNotConsumeAttempts();
+            outstandingInputRecoveryHonorsDeadlineAndStop();
+            inputRecoveryFailuresSurviveOpeningAndRollover();
+            savedAudioResetsActualInputRecoveryFailures();
             captureRecoveryHonorsAttemptAndDeadlineLimits();
             storageRecoveryHonorsThreeRetriesAndTheNoProgressDeadline();
             stopCancelsRolloverWhileThePriorFileFinishes();
@@ -1112,6 +1339,11 @@ int main(int argc, char** argv)
         cleanRecordingsAndLogCollisionsPreserveExistingFiles();
         requiredLogAppendFailuresStopEvenDuringFinalization();
         headerAndRequiredLogFailuresPreserveBothNativeDiagnostics();
+        pendingInputRecoveryDoesNotConsumeAttempts();
+        slowInputReopenConsumesOnlyItsActualFailure();
+        outstandingInputRecoveryHonorsDeadlineAndStop();
+        inputRecoveryFailuresSurviveOpeningAndRollover();
+        savedAudioResetsActualInputRecoveryFailures();
         captureRecoveryHonorsAttemptAndDeadlineLimits();
         storageRecoveryHonorsThreeRetriesAndTheNoProgressDeadline();
         stopCancelsRolloverWhileThePriorFileFinishes();

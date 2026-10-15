@@ -62,7 +62,7 @@ public:
         int leftInputChannel = 0, rightInputChannel = -1;
         juce::File logFile;
         bool hasRecordingErrors = false;
-        unsigned recoveryAttempts = 0;
+        unsigned recoveryAttempts = 0; // Actual input recovery requests taken since the last saved incoming audio.
         bool controlsLocked() const noexcept { return state == State::recording || state == State::recovering || state == State::finalizing; }
     };
 
@@ -90,7 +90,9 @@ public:
     // Control thread. A nonzero count records grouped callback occurrences;
     // zero publishes a diagnostic idempotently when polling or reopening input.
     void retainInputDiagnostic(const juce::String&, uint64_t occurrences = 0);
-    bool takeInputRecoveryRequest(); // Control thread. Reopen only the originally selected input.
+    // Control thread. Starts one attempt; finish it before taking another request.
+    // Reopen only the originally selected input. Pending requests do not consume attempts.
+    bool takeInputRecoveryRequest();
     void inputRecoveryFinished(const RecorderResult&);
     void inputFormatChanged(double inputStreamRate, int availableInputChannels) noexcept;
 

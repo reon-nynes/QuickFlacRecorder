@@ -485,7 +485,9 @@ void repeatedNativeInputErrorsAreGrouped(const juce::File& root)
 }
 void nativeCompatibleInputRecovery(const juce::File& root)
 {
-    qfr::RecordingSession session;
+    qfr::RecordingSession::Options options;
+    options.recoveryInterval = std::chrono::milliseconds(25);
+    qfr::RecordingSession session(options);
     qfr::InputController input(session);
     const auto driver = input.defaultDriver(), device = input.defaultDevice(driver);
     require(input.open(driver, device).wasOk(), "open the actual selected Windows input for recovery");
@@ -495,6 +497,9 @@ void nativeCompatibleInputRecovery(const juce::File& root)
     juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
     input.audioDeviceError("Controlled native input interruption {detail}");
     input.close();
+    juce::MessageManager::getInstance()->runDispatchLoopUntil(120);
+    require(session.snapshot().controlsLocked() && session.snapshot().recoveryAttempts == 0,
+        "native selected-device recovery stays pending across retry times until input control polls it");
     const auto deadline = juce::Time::getMillisecondCounterHiRes() + 3000;
     bool recovered = false;
     while (juce::Time::getMillisecondCounterHiRes() < deadline)
@@ -505,7 +510,8 @@ void nativeCompatibleInputRecovery(const juce::File& root)
     }
     session.requestStop(); input.close(); session.waitForStop();
     const auto result = session.snapshot();
-    require(recovered && input.driver() == driver && input.inputDevice() == device,
+    require(recovered && input.driver() == driver && input.inputDevice() == device
+        && result.leftInputChannel == 0 && result.rightInputChannel == -1,
         "production input control reopens the same native input");
     require(result.recordingFile == file.getSiblingFile("native-recovery_01.flac") && !result.incomplete,
         "native compatible recovery finalizes the original recording filename");

@@ -7,6 +7,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <utility>
 #include <cstring>
 #if JUCE_WINDOWS
 #ifndef NOMINMAX
@@ -447,10 +448,13 @@ struct RecordingSession::Impl
     std::atomic<int64_t> startedAt { 0 }, endedAt { 0 }, lastCallback { 0 }, recoverySince { 0 };
     std::atomic<unsigned> recoveryAttempts { 0 };
     bool inputRecovering = false;
+    // Protected by mutex; a request stays in flight until the writer logs its result.
+    bool reopenInFlight = false, reopenStarted = false;
+    unsigned failedRecoveryAttempts = 0;
     std::atomic<double> actualRate { 0 }, writerRate { 0 };
     std::atomic<int> availableChannels { 0 };
     enum class ReopenOutcome { none, reopened, failed };
-    std::atomic<ReopenOutcome> reopenOutcome { ReopenOutcome::none };
+    ReopenOutcome reopenOutcome = ReopenOutcome::none;
     juce::String lastInputDetail;
     std::vector<juce::String> pendingInputDetails;
     uint64_t recoveryThreshold = 0;
@@ -598,16 +602,28 @@ struct RecordingSession::Impl
         }
         for (const auto& diagnostic : diagnostics) event("Native input diagnostic: " + diagnostic);
     }
+    // Caller holds mutex. All recording-log I/O stays on the writer thread.
+    void logRecoveryOutcome()
+    {
+        if (reopenStarted)
+        {
+            reopenStarted = false;
+            event("Input recovery attempt " + juce::String(recoveryAttempts.load()));
+        }
+        const auto outcome = std::exchange(reopenOutcome, ReopenOutcome::none);
+        if (outcome == ReopenOutcome::none) return;
+        reopenInFlight = false;
+        if (outcome == ReopenOutcome::failed && recoverySince != 0) ++failedRecoveryAttempts;
+        event(outcome == ReopenOutcome::reopened ? "Selected input reopened; waiting for saved incoming audio."
+            : "Selected input recovery attempt failed.");
+    }
     void serviceRecovery()
     {
         logInputDiagnostics();
+        std::lock_guard lock(mutex);
+        logRecoveryOutcome();
         if (stopping || terminalFailure) return;
-        const auto outcome = reopenOutcome.exchange(ReopenOutcome::none);
-        if (outcome != ReopenOutcome::none)
-        {
-            event(outcome == ReopenOutcome::reopened ? "Selected input reopened; waiting for saved incoming audio." : "Selected input recovery attempt failed.");
-            if (outcome == ReopenOutcome::failed && recoveryAttempts >= 3) { fail(Failure::inputLost); return; }
-        }
+        if (failedRecoveryAttempts >= 3) { fail(Failure::inputLost); return; }
         if (inputFault.exchange(false))
             beginRecovery(faultHead, "Input device interrupted");
         if (!inputRecovering && monotonicMillis() - lastCallback >= options.callbackTimeout.count())
@@ -624,21 +640,23 @@ struct RecordingSession::Impl
                 + "; no recording progress for " + juce::String(duration) + "ms.");
             fail(Failure::inputLost);
         }
-        else if (inputRecovering && recoveryAttempts < 3
+        else if (inputRecovering && !reopenInFlight && !reopenRequested
             && monotonicMillis() - recoveryAttemptStart >= static_cast<int64_t>(recoveryAttempts.load()) * options.recoveryInterval.count())
         {
-            const auto attempt = recoveryAttempts.fetch_add(1) + 1;
-            if (event("Input recovery attempt " + juce::String(attempt) + "/3")) reopenRequested = true;
+            reopenRequested = true;
         }
     }
     void savedProgress(uint64_t through)
     {
+        std::lock_guard lock(mutex);
+        logRecoveryOutcome();
         lastProgress = monotonicMillis();
         if (recoverySince != 0 && through > recoveryThreshold)
         {
             if (!event("Recovery succeeded; recording gap estimated duration="
                 + juce::String(monotonicMillis() - recoverySince) + "ms; missing audio omitted.")) return;
             recoverySince = 0; recoveryAttempts = 0; reopenRequested = false;
+            failedRecoveryAttempts = 0;
             inputRecovering = false;
             auto expected = State::recovering;
             state.compare_exchange_strong(expected, State::recording);
@@ -726,6 +744,10 @@ struct RecordingSession::Impl
         const bool promotionFailed = complete && !promoteWithoutReplacement(partial, final, *io);
         if (promotionFailed) { fail(Failure::promotion); complete = false; }
         logInputDiagnostics();
+        {
+            std::lock_guard lock(mutex);
+            logRecoveryOutcome();
+        }
         if (hasErrors) event(complete ? "Recording finalized: " + final.getFileName() : "Recording incomplete: " + partial.getFileName());
         const bool rolling = !stopping && !terminalFailure && rolloverPending;
         if (!rolling) finishLog(log);
@@ -880,6 +902,7 @@ RecorderResult RecordingSession::start()
         impl->rolloverPending = false;
         impl->recoverySince = 0; impl->recoveryAttempts = 0;
         impl->inputRecovering = false; impl->reopenOutcome = Impl::ReopenOutcome::none; impl->droppedFrames = 0;
+        impl->reopenInFlight = false; impl->reopenStarted = false; impl->failedRecoveryAttempts = 0;
         impl->pendingInputDetails.clear(); impl->lastInputDetail.clear();
         impl->startedAt = monotonicMillis(); impl->endedAt = 0; impl->lastCallback = impl->startedAt.load();
         impl->lastProgress = impl->startedAt;
@@ -969,12 +992,19 @@ void RecordingSession::retainInputDiagnostic(const juce::String& detail, uint64_
 }
 bool RecordingSession::takeInputRecoveryRequest()
 {
-    return !impl->stopping && !impl->terminalFailure && impl->reopenRequested.exchange(false);
+    std::lock_guard lock(impl->mutex);
+    if (impl->stopping || impl->terminalFailure || impl->reopenInFlight || !impl->reopenRequested.exchange(false)) return false;
+    impl->reopenInFlight = true;
+    impl->reopenStarted = true;
+    ++impl->recoveryAttempts;
+    return true;
 }
 void RecordingSession::inputRecoveryFinished(const RecorderResult& result)
 {
     if (impl->stopping || impl->terminalFailure) return;
     retainInputDiagnostic(result.detail);
+    std::lock_guard lock(impl->mutex);
+    if (!impl->reopenInFlight) return;
     impl->reopenOutcome = result.wasOk() ? Impl::ReopenOutcome::reopened : Impl::ReopenOutcome::failed;
 }
 void RecordingSession::inputFormatChanged(double rate, int channels) noexcept
