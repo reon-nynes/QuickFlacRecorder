@@ -4,6 +4,7 @@
 #include "RecordingSession.h"
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <atomic>
+#include <array>
 #include <functional>
 
 namespace qfr
@@ -58,8 +59,19 @@ private:
     std::atomic<int> lastXRunCount { -1 };
     std::atomic<bool> intentionalStop { true }, deviceLost { false }, started { false };
     std::atomic<bool> inputVerified { false };
-    std::atomic<unsigned> diagnosticState { 0 }; // Empty, callback publishing, ready.
+    enum class DiagnosticState { empty, publishing, ready };
+    struct InputDiagnostic
+    {
+        std::atomic<DiagnosticState> state { DiagnosticState::empty };
+        std::atomic<uint64_t> occurrences { 0 };
+        juce::String detail;
+    };
+    // Entries remain immutable until close() has stopped all native callbacks.
+    // Repeated messages use one entry. Control-thread polling drains counts.
+    std::array<InputDiagnostic, 32> diagnostics;
+    std::atomic<uint64_t> diagnosticOverflow { 0 };
+    juce::String firstDiagnostic() const;
+    void drainDiagnostics();
     std::atomic<int> inputChannelCount { 0 };
-    juce::String nativeDetail;
 };
 }

@@ -91,6 +91,7 @@ void InputController::close()
     lastXRunCount.store(-1);
     streamRate.store(0);
     channelNames.clear();
+    drainDiagnostics();
 }
 
 RecorderResult InputController::open(const juce::String& driverName, const juce::String& deviceName)
@@ -100,7 +101,12 @@ RecorderResult InputController::open(const juce::String& driverName, const juce:
     else if (recordingChannelNames.isEmpty()) recordingChannelNames = channelNames;
     close();
     deviceLost.store(false);
-    nativeDetail.clear(); diagnosticState = 0;
+    for (auto& diagnostic : diagnostics)
+    {
+        diagnostic.detail.clear(); diagnostic.occurrences = 0;
+        diagnostic.state = DiagnosticState::empty;
+    }
+    diagnosticOverflow = 0;
     selectedDriver = driverName;
     selectedDevice = deviceName;
     auto* type = findType(driverName);
@@ -145,7 +151,7 @@ RecorderResult InputController::open(const juce::String& driverName, const juce:
     if (! device->isPlaying())
     {
         close();
-        return { ErrorCode::deviceStartFailed, diagnosticState.load(std::memory_order_acquire) == 2 ? nativeDetail : juce::String(), driverName, deviceName };
+        return { ErrorCode::deviceStartFailed, firstDiagnostic(), driverName, deviceName };
     }
     return {};
 }
@@ -166,6 +172,22 @@ bool InputController::isAvailable() const
 {
     return device && inputVerified && ! deviceLost.load() && device->isOpen() && device->isPlaying();
 }
+juce::String InputController::firstDiagnostic() const
+{
+    const auto& first = diagnostics.front();
+    return first.state.load(std::memory_order_acquire) == DiagnosticState::ready ? first.detail : juce::String();
+}
+void InputController::drainDiagnostics()
+{
+    for (auto& diagnostic : diagnostics)
+    {
+        if (diagnostic.state.load(std::memory_order_acquire) != DiagnosticState::ready) break;
+        const auto occurrences = diagnostic.occurrences.exchange(0);
+        if (occurrences != 0) session.retainInputDiagnostic(diagnostic.detail, occurrences);
+    }
+    const auto overflow = diagnosticOverflow.exchange(0);
+    if (overflow != 0) session.retainInputDiagnostic("Native input diagnostic buffer full; additional distinct callback messages omitted", overflow);
+}
 
 RecorderResult InputController::pollError()
 {
@@ -184,9 +206,8 @@ RecorderResult InputController::pollError()
     RecorderResult result;
     if (deviceLost.load())
     {
-        const auto detail = diagnosticState.load(std::memory_order_acquire) == 2 ? nativeDetail : juce::String();
-        session.retainInputDiagnostic(detail);
-        result = { ErrorCode::deviceLost, detail, selectedDriver, selectedDevice };
+        drainDiagnostics();
+        result = { ErrorCode::deviceLost, firstDiagnostic(), selectedDriver, selectedDevice };
     }
     if (session.takeInputRecoveryRequest())
     {
@@ -253,14 +274,29 @@ void InputController::audioDeviceStopped()
 
 void InputController::audioDeviceError(const juce::String& detail)
 {
-    unsigned expected = 0;
-    if (diagnosticState.compare_exchange_strong(expected, 1))
+    bool published = false;
+    for (auto& diagnostic : diagnostics)
     {
-        // JUCE String copy shares its immutable, reference-counted text. Publish
-        // the first diagnostic without a callback lock or text allocation.
-        nativeDetail = detail;
-        diagnosticState.store(2, std::memory_order_release);
+        auto current = diagnostic.state.load(std::memory_order_acquire);
+        if (current == DiagnosticState::ready && diagnostic.detail == detail)
+        {
+            diagnostic.occurrences.fetch_add(1);
+            published = true;
+            break;
+        }
+        if (current == DiagnosticState::empty
+            && diagnostic.state.compare_exchange_strong(current, DiagnosticState::publishing))
+        {
+            // JUCE String shares its immutable text. Publish without allocating
+            // text, blocking, or performing I/O on the native callback thread.
+            diagnostic.detail = detail;
+            diagnostic.occurrences = 1;
+            diagnostic.state.store(DiagnosticState::ready, std::memory_order_release);
+            published = true;
+            break;
+        }
     }
+    if (!published) diagnosticOverflow.fetch_add(1);
     deviceLost.store(true);
     session.inputLost();
 }

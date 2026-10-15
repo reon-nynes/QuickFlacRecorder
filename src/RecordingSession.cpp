@@ -449,11 +449,13 @@ struct RecordingSession::Impl
     bool inputRecovering = false;
     std::atomic<double> actualRate { 0 }, writerRate { 0 };
     std::atomic<int> availableChannels { 0 };
-    std::atomic<int> reopenOutcome { 0 };
-    juce::String pendingInputDetail;
+    enum class ReopenOutcome { none, reopened, failed };
+    std::atomic<ReopenOutcome> reopenOutcome { ReopenOutcome::none };
+    juce::String lastInputDetail;
+    std::vector<juce::String> pendingInputDetails;
     uint64_t recoveryThreshold = 0;
     int64_t recoveryAttemptStart = 0, lastProgress = 0;
-    std::shared_ptr<RecordingLog> log;
+    std::shared_ptr<RecordingLog> log, failedLog;
     std::vector<float> ring;
     std::thread worker;
 
@@ -545,8 +547,27 @@ struct RecordingSession::Impl
                 return true;
         }
         catch (...) {} // Failure to persist a required diagnostic is terminal.
+        if (!failedLog) failedLog = recordingLog;
         fail(Failure::log);
         return false;
+    }
+    void finishLog(const std::shared_ptr<RecordingLog>& recordingLog)
+    {
+        if (recordingLog && !recordingLog->finish())
+        {
+            if (!failedLog) failedLog = recordingLog;
+            fail(Failure::log);
+        }
+    }
+    // Caller holds mutex when publishing diagnostics to the control-thread view.
+    void publishLogFailure()
+    {
+        if (!failedLog) return;
+        view.failureReason = Failure::log;
+        view.logFile = failedLog->file;
+        view.logError = diskResult(ErrorCode::none, *failedLog->status);
+        if (view.error.disk.operation == DiskOperation::none)
+            view.error = diskResult(view.error.code, *failedLog->status);
     }
     void logCallbackErrors()
     {
@@ -568,21 +589,24 @@ struct RecordingSession::Impl
         state.compare_exchange_strong(expected, State::recovering);
         event(message + "; recording gap begins; missing duration estimated from elapsed time.");
     }
-    void serviceRecovery()
+    void logInputDiagnostics()
     {
-        juce::String diagnostic;
+        std::vector<juce::String> diagnostics;
         {
             std::lock_guard lock(mutex);
-            diagnostic = std::move(pendingInputDetail);
-            pendingInputDetail.clear();
+            diagnostics.swap(pendingInputDetails);
         }
-        if (diagnostic.isNotEmpty()) event("Native input diagnostic: " + diagnostic);
+        for (const auto& diagnostic : diagnostics) event("Native input diagnostic: " + diagnostic);
+    }
+    void serviceRecovery()
+    {
+        logInputDiagnostics();
         if (stopping || terminalFailure) return;
-        const auto outcome = reopenOutcome.exchange(0);
-        if (outcome != 0)
+        const auto outcome = reopenOutcome.exchange(ReopenOutcome::none);
+        if (outcome != ReopenOutcome::none)
         {
-            event(outcome == 1 ? "Selected input reopened; waiting for saved incoming audio." : "Selected input recovery attempt failed.");
-            if (outcome == 2 && recoveryAttempts >= 3) { fail(Failure::inputLost); return; }
+            event(outcome == ReopenOutcome::reopened ? "Selected input reopened; waiting for saved incoming audio." : "Selected input recovery attempt failed.");
+            if (outcome == ReopenOutcome::failed && recoveryAttempts >= 3) { fail(Failure::inputLost); return; }
         }
         if (inputFault.exchange(false))
             beginRecovery(faultHead, "Input device interrupted");
@@ -701,9 +725,10 @@ struct RecordingSession::Impl
         bool complete = finalizationValid && failure.load() != Failure::writer && failure.load() != Failure::diskFlush;
         const bool promotionFailed = complete && !promoteWithoutReplacement(partial, final, *io);
         if (promotionFailed) { fail(Failure::promotion); complete = false; }
+        logInputDiagnostics();
         if (hasErrors) event(complete ? "Recording finalized: " + final.getFileName() : "Recording incomplete: " + partial.getFileName());
         const bool rolling = !stopping && !terminalFailure && rolloverPending;
-        if (!rolling && log && !log->finish()) fail(Failure::log);
+        if (!rolling) finishLog(log);
         const auto reason = failure.load();
         {
             std::lock_guard lock(mutex);
@@ -715,13 +740,23 @@ struct RecordingSession::Impl
                 : diskFlushFailed || io->flushFailed ? FinalizationOutcome::diskFlushFailed
                 : FinalizationOutcome::writerFailed;
             view.error = diskResult(ErrorCode::none, *io);
-            if (failure == Failure::log && view.error.disk.operation == DiskOperation::none && log)
-                view.error = diskResult(ErrorCode::none, *log->status);
+            publishLogFailure();
             uint64_t next = 1;
             if (nextCounter(config, next).wasOk()) view.nextFile = config.targetFolder.getChildFile(numberedName(config.recordingPrefix, next));
         }
         endedAt = rolling ? 0 : monotonicMillis();
         state.store(rolling ? State::recovering : complete && !terminalFailure ? State::succeeded : State::failed, std::memory_order_release);
+    }
+    void cancelRollover(const juce::String& message)
+    {
+        event(message);
+        fail(Failure::inputLost);
+        finishLog(log);
+        std::lock_guard lock(mutex);
+        view.failureReason = failure;
+        publishLogFailure();
+        endedAt = monotonicMillis();
+        state = State::failed;
     }
     void run(FileContext file, double rate, int channels)
     {
@@ -730,35 +765,39 @@ struct RecordingSession::Impl
             writeRecording(std::move(file.writer), file.output, file.io, file.partial, file.final, rate, channels);
             if (stopping || terminalFailure || !rolloverPending.exchange(false)) return;
             if (recoverySince != 0 && monotonicMillis() - recoverySince >= options.noProgressTimeout.count())
-            { event("Recording rollover canceled at the no-progress deadline."); fail(Failure::inputLost); state = State::failed; return; }
+            { cancelRollover("Recording rollover canceled at the no-progress deadline."); return; }
             const auto nextRate = actualRate.load();
             const auto previous = file.final;
             const auto previousLog = log;
             if (!std::isfinite(nextRate) || nextRate < 1 || nextRate > 655350 || std::floor(nextRate) != nextRate)
-            { event("Cannot roll over to an invalid input stream rate."); fail(Failure::inputLost); state = State::failed; return; }
+            { cancelRollover("Cannot roll over to an invalid input stream rate."); return; }
             FileContext next;
             const auto opened = openFile(next, nextRate);
             if (opened.failed())
             {
                 eventTo(previousLog, "Recording rollover could not start: " + next.partial.getFileName() + "; " + opened.detail);
+                finishLog(previousLog);
+                finishLog(log);
+                fail(Failure::start);
                 std::lock_guard lock(mutex);
                 view.error = opened;
+                view.failureReason = failure;
                 if (next.reserved)
                 {
                     view.recordingFile = next.partial; view.incomplete = true; view.logFile = log->file;
                     view.finalization = FinalizationOutcome::writerFailed;
                 }
+                publishLogFailure();
+                endedAt = monotonicMillis();
                 state = State::failed;
                 return;
             }
             const auto link = "Recording rollover from " + previous.getFileName() + " to " + next.final.getFileName()
                 + "; input stream rate " + juce::String(rate, 0) + " -> " + juce::String(nextRate, 0) + " Hz.";
-            if (!eventTo(previousLog, link) || !event(link) || !previousLog->finish() || stopping || terminalFailure)
-            {
-                next.writer.reset();
-                state = terminalFailure ? State::failed : State::succeeded;
-                return;
-            }
+            if (eventTo(previousLog, link)) event(link);
+            finishLog(previousLog);
+            // Once reserved, the next file must go through normal finalization
+            // even when Stop or a required-log failure prevents accepting audio.
             file = std::move(next);
             rate = nextRate;
             writerRate = rate;
@@ -820,20 +859,28 @@ RecorderResult RecordingSession::start()
         std::lock_guard lock(impl->mutex);
         auto reject = [&](RecorderResult error)
         {
-            impl->state = State::failed;
+            file.writer.reset();
+            impl->finishLog(impl->log);
             impl->view.error = error;
             impl->view.failureReason = FailureReason::start;
+            if (file.reserved) impl->view.finalization = FinalizationOutcome::writerFailed;
+            impl->publishLogFailure();
+            impl->endedAt = monotonicMillis();
+            impl->state = State::failed;
             return error;
         };
         impl->view.recordingFile = juce::File{}; impl->view.incomplete = false; impl->capturedFrames = 0;
+        impl->head = 0; impl->tail = 0; impl->failure = Impl::Failure::none;
         impl->view.failureReason = FailureReason::none; impl->view.finalization = FinalizationOutcome::none;
         impl->view.inputDetail.clear();
-        impl->log.reset();
+        impl->view.logError = {};
+        impl->log.reset(); impl->failedLog.reset();
         impl->hasErrors = false; impl->terminalFailure = false; impl->discontinuities = 0;
         impl->stopping = false; impl->inputFault = false; impl->reopenRequested = false;
         impl->rolloverPending = false;
         impl->recoverySince = 0; impl->recoveryAttempts = 0;
-        impl->inputRecovering = false; impl->reopenOutcome = 0; impl->droppedFrames = 0; impl->pendingInputDetail.clear();
+        impl->inputRecovering = false; impl->reopenOutcome = Impl::ReopenOutcome::none; impl->droppedFrames = 0;
+        impl->pendingInputDetails.clear(); impl->lastInputDetail.clear();
         impl->startedAt = monotonicMillis(); impl->endedAt = 0; impl->lastCallback = impl->startedAt.load();
         impl->lastProgress = impl->startedAt;
         impl->actualRate = impl->config.inputStreamRate;
@@ -854,9 +901,8 @@ RecorderResult RecordingSession::start()
         impl->view.logFile = impl->log ? impl->log->file : juce::File();
         if (opened.failed()) return reject(opened);
         impl->ring.resize(impl->options.captureCapacityFrames * 2);
-        impl->head = 0; impl->tail = 0; impl->capturedFrames = 0; impl->failure = Impl::Failure::none;
         impl->view.error = {};
-        impl->state = State::recording;
+        impl->state = impl->recoverySince != 0 ? State::recovering : State::recording;
         impl->accepting = true;
         impl->worker = std::thread([p = impl.get(), file = std::move(file), io,
                                   rate = impl->config.inputStreamRate, channels]() mutable
@@ -908,13 +954,17 @@ void RecordingSession::requestStop()
     }
 }
 void RecordingSession::waitForStop() { if (impl->worker.joinable()) impl->worker.join(); }
-void RecordingSession::retainInputDiagnostic(const juce::String& detail)
+void RecordingSession::retainInputDiagnostic(const juce::String& detail, uint64_t occurrences)
 {
     std::lock_guard lock(impl->mutex);
-    if (impl->failure.load() == FailureReason::inputLost && impl->view.inputDetail.isEmpty())
+    if (detail.isNotEmpty() && (impl->locked() || impl->failure.load() == FailureReason::inputLost))
     {
-        impl->view.inputDetail = detail;
-        impl->pendingInputDetail = detail;
+        if (impl->view.inputDetail.isEmpty()) impl->view.inputDetail = detail;
+        if (impl->locked() && (occurrences != 0 || detail != impl->lastInputDetail))
+        {
+            impl->pendingInputDetails.push_back(detail + (occurrences != 0 ? "; count=" + juce::String(occurrences) : juce::String()));
+            impl->lastInputDetail = detail;
+        }
     }
 }
 bool RecordingSession::takeInputRecoveryRequest()
@@ -925,7 +975,7 @@ void RecordingSession::inputRecoveryFinished(const RecorderResult& result)
 {
     if (impl->stopping || impl->terminalFailure) return;
     retainInputDiagnostic(result.detail);
-    impl->reopenOutcome = result.wasOk() ? 1 : 2;
+    impl->reopenOutcome = result.wasOk() ? Impl::ReopenOutcome::reopened : Impl::ReopenOutcome::failed;
 }
 void RecordingSession::inputFormatChanged(double rate, int channels) noexcept
 {

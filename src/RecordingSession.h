@@ -49,6 +49,7 @@ public:
         State state = State::idle;
         ResultCode resultCode = ResultCode::none;
         RecorderResult error;
+        RecorderResult logError; // Separate when required logging fails after an earlier recording disk error.
         juce::String inputDetail; // Verbatim native diagnostic retained independently of disk diagnostics.
         FailureReason failureReason = FailureReason::none;
         FinalizationOutcome finalization = FinalizationOutcome::none;
@@ -86,7 +87,9 @@ public:
     void waitForStop(); // Blocking, for tests and shutdown after capture has been stopped.
     Snapshot snapshot() const;
     Levels readLevels() noexcept;
-    void retainInputDiagnostic(const juce::String&); // Control thread, after polling the native input boundary.
+    // Control thread. A nonzero count records grouped callback occurrences;
+    // zero publishes a diagnostic idempotently when polling or reopening input.
+    void retainInputDiagnostic(const juce::String&, uint64_t occurrences = 0);
     bool takeInputRecoveryRequest(); // Control thread. Reopen only the originally selected input.
     void inputRecoveryFinished(const RecorderResult&);
     void inputFormatChanged(double inputStreamRate, int availableInputChannels) noexcept;

@@ -126,10 +126,15 @@ void recoveryAndLoggedOutcomesKeepTheirLocalizedMeaning()
     snapshot.state = qfr::RecordingSession::State::failed;
     snapshot.resultCode = qfr::RecordingSession::ResultCode::failed;
     snapshot.failureReason = qfr::RecordingSession::FailureReason::log;
+    snapshot.error = { qfr::ErrorCode::writerStartFailed, "original recording write failure", {}, {},
+        { qfr::DiskOperation::write, 29, "original recording write failure" } };
+    snapshot.logError.disk = { qfr::DiskOperation::create, 5, "required log create failure" };
     for (const auto* translation : { &english, &chinese })
         require(containsExact(qfr::recordingStatus(snapshot, *translation), snapshot.logFile.getFullPathName())
-            && containsExact(qfr::recordingStatus(snapshot, *translation), snapshot.recordingFile.getFullPathName()),
-            "failed required log reports both the attempted log and retained audio paths");
+            && containsExact(qfr::recordingStatus(snapshot, *translation), snapshot.recordingFile.getFullPathName())
+            && containsExact(qfr::recordingStatus(snapshot, *translation), "original recording write failure")
+            && containsExact(qfr::recordingStatus(snapshot, *translation), "required log create failure"),
+            "failed required log reports both paths and native disk diagnostics independently of a startup error code");
 }
 }
 int main()

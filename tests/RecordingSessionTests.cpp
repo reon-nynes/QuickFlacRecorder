@@ -313,12 +313,16 @@ void compatibleInputRecoveryKeepsTheRecordingAndResetsOnSavedAudio()
     std::array<float, 512> samples; samples.fill(.25f);
     const float* inputs[] { samples.data() };
     session.processInput(inputs, 1, 512);
+    session.inputDiscontinuity();
     session.inputLost();
+    session.retainInputDiagnostic("native input error after a sample-loss warning");
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     bool requested = false;
     while (!(requested = session.takeInputRecoveryRequest()) && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     require(requested && session.snapshot().controlsLocked(), "input interruption requests immediate selected-device recovery");
+    require(session.snapshot().inputDetail == "native input error after a sample-loss warning",
+        "earlier sample loss cannot suppress a later native input diagnostic");
     session.inputFormatChanged(48000, 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     require(session.snapshot().recoveryAttempts == 1, "opening compatible input alone does not reset the recovery allowance");
@@ -328,12 +332,71 @@ void compatibleInputRecoveryKeepsTheRecordingAndResetsOnSavedAudio()
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     require(session.snapshot().recoveryAttempts == 0 && session.snapshot().recordingFile == file,
         "new valid audio saved by the writer recovers the same file and resets interruption attempts");
+    session.inputLost();
+    session.retainInputDiagnostic("second native interruption");
+    session.retainInputDiagnostic("second native interruption");
+    session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "distinct reopen failure" });
+    session.inputFormatChanged(48000, 1);
+    session.processInput(inputs, 1, 512);
     session.requestStop(); session.waitForStop();
     const auto outcome = session.snapshot();
-    require(!outcome.incomplete && decode(outcome.recordingFile)->lengthInSamples == 1024
+    require(!outcome.incomplete && decode(outcome.recordingFile)->lengthInSamples == 1536
         && outcome.elapsedSeconds >= .03, "compatible reopening preserves both audio blocks and includes the recording gap in the timer");
-    require(folder.file.getChildFile("take_01.log").loadFileAsString().contains("Recovery succeeded"),
-        "recording log records successful capture recovery");
+    const auto log = folder.file.getChildFile("take_01.log").loadFileAsString();
+    require(log.contains("Recovery succeeded") && log.contains("native input error after a sample-loss warning")
+        && log.contains("second native interruption") && log.contains("distinct reopen failure")
+        && outcome.inputDetail == "native input error after a sample-loss warning",
+        "recording log retains distinct later diagnostics while the snapshot preserves the first");
+    require(log.indexOf("second native interruption") == log.lastIndexOf("second native interruption"),
+        "repeated polling of the same native diagnostic does not flood the recording log");
+}
+void startupStorageRecoveryUsesOnlyTheNewTakesProgress()
+{
+    Folder folder;
+    auto disk = std::make_shared<DiskControl>();
+    auto options = diskOptions(disk);
+    options.callbackTimeout = std::chrono::seconds(2);
+    qfr::RecordingSession session(options);
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start prior take for storage recovery reset");
+    std::array<float, 16384> samples; samples.fill(.25f);
+    const float* input[] { samples.data() };
+    session.processInput(input, 1, 16384);
+    session.requestStop(); session.waitForStop();
+    disk->partialFailureBytes = 1;
+    require(session.start().wasOk(), "transient second-take header failure recovers");
+    session.processInput(input, 1, 512);
+    const auto logFile = folder.file.getChildFile("take_02.log");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!logFile.loadFileAsString().contains("Recovery succeeded") && session.snapshot().controlsLocked()
+        && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    const auto recovered = session.snapshot();
+    session.requestStop(); session.waitForStop();
+    require(recovered.state == qfr::RecordingSession::State::recording
+        && logFile.loadFileAsString().contains("Recovery succeeded")
+        && session.snapshot().state == qfr::RecordingSession::State::succeeded
+        && decode(session.snapshot().recordingFile)->lengthInSamples == 512,
+        "saved incoming audio in a new take resets startup storage recovery regardless of the prior take's length");
+}
+void inputDiagnosticsDuringFinalizationReachTheRecordingLog()
+{
+    Folder folder;
+    auto disk = std::make_shared<DiskControl>(); disk->blockFinalization = true;
+    qfr::RecordingSession session(diskOptions(disk));
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start late native diagnostic recording");
+    session.requestStop();
+    bool entered = false;
+    {
+        std::unique_lock lock(disk->mutex);
+        entered = disk->changed.wait_for(lock, std::chrono::seconds(2), [&] { return disk->enteredFinalization; });
+    }
+    session.retainInputDiagnostic("native detail arriving during finalization");
+    {
+        std::lock_guard lock(disk->mutex); disk->release = true;
+    }
+    disk->changed.notify_all(); session.waitForStop();
+    require(entered && session.snapshot().logFile.loadFileAsString().contains("native detail arriving during finalization"),
+        "native diagnostics received while saving finishes are persisted before the required log closes");
 }
 void changedInputRateRollsOverAutomaticallyWithLinkedLogs()
 {
@@ -385,6 +448,38 @@ void cleanRecordingsAndLogCollisionsPreserveExistingFiles()
         && occupied.loadFileAsString() == "created concurrently" && !session.takeInputRecoveryRequest(),
         "required log collision stops capture, preserves the existing log, and prevents restarting");
 }
+void requiredLogCloseFailureDuringRolloverReportsFailureAndFinalizesReservedAudio()
+{
+    Folder folder;
+    qfr::RecordingSession::Options options;
+    options.nativeError = [](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+    {
+        if (operation == qfr::DiskOperation::close && file.getFileName() == "take_01.log")
+        {
+           #if JUCE_WINDOWS
+            return ERROR_DISK_FULL;
+           #else
+            return ENOSPC;
+           #endif
+        }
+        return 0;
+    };
+    qfr::RecordingSession session(options);
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start rollover log close failure");
+    session.inputFormatChanged(44100, 1);
+    session.waitForStop();
+    const auto result = session.snapshot();
+    require(result.state == qfr::RecordingSession::State::failed
+        && result.failureReason == qfr::RecordingSession::FailureReason::log
+        && result.error.disk.operation == qfr::DiskOperation::close && !session.takeInputRecoveryRequest(),
+        "required log close failure during rollover stops recovery and cannot report successful recording");
+    require(result.recordingFile == folder.file.getChildFile("take_02.flac") && !result.incomplete
+        && result.logFile == folder.file.getChildFile("take_01.log")
+        && decode(result.recordingFile)->lengthInSamples == 0
+        && !folder.file.getChildFile("take_02.partial.flac").exists()
+        && decode(folder.file.getChildFile("take_01.flac"))->sampleRate == 48000,
+        "rollover log failure reports the affected log and truthfully finalizes every reserved FLAC");
+}
 void requiredLogAppendFailuresStopEvenDuringFinalization()
 {
     Folder folder;
@@ -413,6 +508,55 @@ void requiredLogAppendFailuresStopEvenDuringFinalization()
         && session.snapshot().failureReason == qfr::RecordingSession::FailureReason::log
         && session.snapshot().error.disk.operation == qfr::DiskOperation::write,
         "required log append failure preserves native disk detail and cannot report successful saving");
+}
+void headerAndRequiredLogFailuresPreserveBothNativeDiagnostics()
+{
+    for (const bool rollover : { false, true })
+    {
+        Folder folder;
+        std::atomic<bool> failHeader { true };
+        qfr::RecordingSession::Options options;
+        const juce::String prefix = rollover ? "take_02" : "take_01";
+        options.nativeError = [&](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+        {
+            if (!file.getFileName().startsWith(prefix)) return 0;
+            if (operation == qfr::DiskOperation::write && file.hasFileExtension("flac") && failHeader.exchange(false))
+            {
+               #if JUCE_WINDOWS
+                return ERROR_WRITE_FAULT;
+               #else
+                return EIO;
+               #endif
+            }
+            if (operation == qfr::DiskOperation::create && file.hasFileExtension("log"))
+            {
+               #if JUCE_WINDOWS
+                return ERROR_ACCESS_DENIED;
+               #else
+                return EACCES;
+               #endif
+            }
+            return 0;
+        };
+        qfr::RecordingSession session(options);
+        require(session.configure(config(folder)).wasOk(), "configure header and log failure");
+        if (rollover)
+        {
+            require(session.start().wasOk(), "start prior recording before rollover header failure");
+            session.inputFormatChanged(44100, 1);
+            session.waitForStop();
+        }
+        else require(session.start().failed(), "startup rejects an unrecoverable required-log failure");
+        const auto result = session.snapshot();
+        require(result.state == qfr::RecordingSession::State::failed
+            && result.failureReason == qfr::RecordingSession::FailureReason::log
+            && result.incomplete && result.recordingFile.getFileName() == prefix + ".partial.flac"
+            && result.logFile.getFileName() == prefix + ".log"
+            && result.error.disk.operation == qfr::DiskOperation::write
+            && result.logError.disk.operation == qfr::DiskOperation::create
+            && result.error.disk.nativeCode != result.logError.disk.nativeCode,
+            "startup and rollover preserve the first native disk error and report a required-log failure with the retained partial");
+    }
 }
 void captureRecoveryHonorsAttemptAndDeadlineLimits()
 {
@@ -915,24 +1059,28 @@ int main(int argc, char** argv)
         {
             cleanRecordingsAndLogCollisionsPreserveExistingFiles();
             requiredLogAppendFailuresStopEvenDuringFinalization();
+            headerAndRequiredLogFailuresPreserveBothNativeDiagnostics();
             std::cout << "PASS clean recordings and exclusive recording logs\n";
             return 0;
         }
         if (argc == 2 && juce::String(argv[1]) == "--rollover-only")
         {
             changedInputRateRollsOverAutomaticallyWithLinkedLogs();
+            requiredLogCloseFailureDuringRolloverReportsFailureAndFinalizesReservedAudio();
             std::cout << "PASS rate-change rollover and linked recording logs\n";
             return 0;
         }
         if (argc == 2 && juce::String(argv[1]) == "--input-recovery-only")
         {
             compatibleInputRecoveryKeepsTheRecordingAndResetsOnSavedAudio();
+            inputDiagnosticsDuringFinalizationReachTheRecordingLog();
             std::cout << "PASS compatible input recovery\n";
             return 0;
         }
         if (argc == 2 && juce::String(argv[1]) == "--storage-only")
         {
             storageRetriesPreserveEncodedBytesAndFinalization();
+            startupStorageRecoveryUsesOnlyTheNewTakesProgress();
             std::cout << "PASS storage retries and partial-write integrity\n";
             return 0;
         }
@@ -956,10 +1104,14 @@ int main(int argc, char** argv)
         previewUsesHighestOccupiedCounter();
         std::cout << "PASS filename preview\n";
         storageRetriesPreserveEncodedBytesAndFinalization();
+        startupStorageRecoveryUsesOnlyTheNewTakesProgress();
         compatibleInputRecoveryKeepsTheRecordingAndResetsOnSavedAudio();
+        inputDiagnosticsDuringFinalizationReachTheRecordingLog();
         changedInputRateRollsOverAutomaticallyWithLinkedLogs();
+        requiredLogCloseFailureDuringRolloverReportsFailureAndFinalizesReservedAudio();
         cleanRecordingsAndLogCollisionsPreserveExistingFiles();
         requiredLogAppendFailuresStopEvenDuringFinalization();
+        headerAndRequiredLogFailuresPreserveBothNativeDiagnostics();
         captureRecoveryHonorsAttemptAndDeadlineLimits();
         storageRecoveryHonorsThreeRetriesAndTheNoProgressDeadline();
         stopCancelsRolloverWhileThePriorFileFinishes();

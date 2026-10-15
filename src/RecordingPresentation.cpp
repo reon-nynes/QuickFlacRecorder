@@ -120,13 +120,23 @@ juce::String recordingStatus(const RecordingSession::Snapshot& snapshot, const i
         case RecordingSession::ResultCode::none: return resultMessage(snapshot.error, translation);
         case RecordingSession::ResultCode::failed:
         {
+            if (snapshot.failureReason == RecordingSession::FailureReason::log)
+            {
+                auto message = withDiskDiagnostic(translation.text(MessageId::RecordingLogFailed,
+                    { { "path", snapshot.recordingFile.getFullPathName() }, { "log", snapshot.logFile.getFullPathName() } }),
+                    snapshot.error, translation);
+                if (snapshot.logError.disk.operation != DiskOperation::none
+                    && (snapshot.logError.disk.operation != snapshot.error.disk.operation
+                        || snapshot.logError.disk.nativeCode != snapshot.error.disk.nativeCode))
+                    message = withDiskDiagnostic(message, snapshot.logError, translation);
+                return message;
+            }
             if (snapshot.error.failed()) return resultMessage(snapshot.error, translation, snapshot.incomplete ? snapshot.recordingFile : juce::File());
             juce::String reason = "writer", outcome = "writerFailed";
             switch (snapshot.failureReason)
             {
                 case RecordingSession::FailureReason::log:
-                    return withDiskDiagnostic(translation.text(MessageId::RecordingLogFailed, { { "path", snapshot.recordingFile.getFullPathName() },
-                        { "log", snapshot.logFile.getFullPathName() } }), snapshot.error, translation);
+                    break; // Handled with its separate native log diagnostic above.
                 case RecordingSession::FailureReason::inputLost: reason = "inputLost"; break;
                 case RecordingSession::FailureReason::discontinuity: reason = "discontinuity"; break;
                 case RecordingSession::FailureReason::overflow: reason = "overflow"; break;

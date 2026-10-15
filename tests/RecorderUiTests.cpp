@@ -462,6 +462,27 @@ void nativeTerminalReadiness(const juce::File& root, const juce::File& evidence,
         recorder.removeFromDesktop();
     }
 }
+void repeatedNativeInputErrorsAreGrouped(const juce::File& root)
+{
+    qfr::RecordingSession session;
+    qfr::InputController input(session);
+    require(session.configure({ root, "callback-errors", 48000, 0, -1 }).wasOk() && session.start().wasOk(),
+        "start grouped native input diagnostic recording");
+    for (int count = 0; count < 3; ++count) input.audioDeviceError("repeated native callback failure");
+    input.audioDeviceError("different native callback failure");
+    input.pollError();
+    input.pollError();
+    input.audioDeviceError("native diagnostic after the last poll");
+    input.close();
+    session.requestStop(); session.waitForStop();
+    const auto log = session.snapshot().logFile.loadFileAsString();
+    require(session.snapshot().inputDetail == "repeated native callback failure"
+        && log.contains("repeated native callback failure; count=3")
+        && log.contains("different native callback failure; count=1")
+        && log.contains("native diagnostic after the last poll; count=1")
+        && log.indexOf("repeated native callback failure") == log.lastIndexOf("repeated native callback failure"),
+        "identical callback errors retain the original detail and log a grouped count without polling duplicates");
+}
 void nativeCompatibleInputRecovery(const juce::File& root)
 {
     qfr::RecordingSession session;
@@ -484,11 +505,12 @@ void nativeCompatibleInputRecovery(const juce::File& root)
     }
     session.requestStop(); input.close(); session.waitForStop();
     const auto result = session.snapshot();
-    require(recovered && input.driver() == driver && input.inputDevice() == device
-        && result.recordingFile == file.getSiblingFile("native-recovery_01.flac") && !result.incomplete
-        && result.inputDetail == "Controlled native input interruption {detail}"
-        && result.logFile.loadFileAsString().contains("Recovery succeeded"),
-        "production input control reopens the same native input and continues the same FLAC with original diagnostic");
+    require(recovered && input.driver() == driver && input.inputDevice() == device,
+        "production input control reopens the same native input");
+    require(result.recordingFile == file.getSiblingFile("native-recovery_01.flac") && !result.incomplete,
+        "native compatible recovery finalizes the original recording filename");
+    require(result.inputDetail == "Controlled native input interruption {detail}", "native recovery retains the first input diagnostic");
+    require(result.logFile.loadFileAsString().contains("Recovery succeeded"), "native recovery log confirms saved incoming audio");
     std::cout << "PASS native compatible input recovery: " << driver << ", " << device << ", " << result.inputStreamRate << " Hz\n";
 }
 }
@@ -513,6 +535,7 @@ int main(int argc, char** argv)
         controlsPreserveNativeIdentities(root, evidence, qfr::i18n::Translation({ "en-XA" }, catalogs));
         iconsDoNotUseCaptions(evidence);
         inputResultsDoNotDependOnLanguage();
+        repeatedNativeInputErrorsAreGrouped(root);
         std::cout << "PASS bilingual controls, native identities, and caption-independent icons\n";
         if (args.contains("--native-fault-recovery")) nativeCompatibleInputRecovery(root);
         if (args.contains("--native-incomplete"))
