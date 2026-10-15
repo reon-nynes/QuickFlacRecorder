@@ -455,7 +455,7 @@ struct RecordingSession::Impl
     std::atomic<int64_t> startedAt { 0 }, endedAt { 0 }, lastCallback { 0 }, recoverySince { 0 };
     std::atomic<unsigned> recoveryAttempts { 0 };
     bool inputRecovering = false;
-    // Protected by mutex; a request stays in flight until the writer logs its result.
+    // Protected by mutex; a request stays in flight until the writer collects its result.
     bool reopenInFlight = false, reopenStarted = false;
     unsigned failedRecoveryAttempts = 0;
     std::atomic<double> actualRate { 0 }, writerRate { 0 };
@@ -595,7 +595,7 @@ struct RecordingSession::Impl
             event("Capture buffer overflow; omitted frames=" + juce::String(dropped)
                 + "; known gap duration=" + juce::String(static_cast<double>(dropped) / config.inputStreamRate, 6) + "s.");
     }
-    void beginRecovery(uint64_t threshold, const juce::String& message, int64_t since = 0)
+    void beginRecovery(std::vector<juce::String>& events, uint64_t threshold, const juce::String& message, int64_t since = 0)
     {
         if (stopping || terminalFailure || inputRecovering) return;
         if (recoverySince == 0) { recoverySince = since > 0 ? since : monotonicMillis(); recoveryThreshold = threshold; }
@@ -603,7 +603,7 @@ struct RecordingSession::Impl
         recoveryAttemptStart = monotonicMillis();
         auto expected = State::recording;
         state.compare_exchange_strong(expected, State::recovering);
-        event(message + "; recording gap begins; missing duration estimated from elapsed time.");
+        events.push_back(message + "; recording gap begins; missing duration estimated from elapsed time.");
     }
     void logInputDiagnostics()
     {
@@ -614,41 +614,50 @@ struct RecordingSession::Impl
         }
         for (const auto& diagnostic : diagnostics) event("Native input diagnostic: " + diagnostic);
     }
-    // Caller holds mutex. All recording-log I/O stays on the writer thread.
-    void logRecoveryOutcome()
+    // Caller holds mutex. Capture event text with the state it describes, then
+    // let the writer persist it after releasing the control-state mutex.
+    void collectRecoveryOutcome(std::vector<juce::String>& events)
     {
         if (reopenStarted)
         {
             reopenStarted = false;
-            event("Input recovery attempt " + juce::String(recoveryAttempts.load()));
+            events.push_back("Input recovery attempt " + juce::String(recoveryAttempts.load()));
         }
         const auto outcome = std::exchange(reopenOutcome, ReopenOutcome::none);
         if (outcome == ReopenOutcome::none) return;
         reopenInFlight = false;
         if (outcome == ReopenOutcome::failed && recoverySince != 0) ++failedRecoveryAttempts;
-        event(outcome == ReopenOutcome::reopened ? "Selected input reopened; waiting for saved incoming audio."
+        events.push_back(outcome == ReopenOutcome::reopened ? "Selected input reopened; waiting for saved incoming audio."
             : "Selected input recovery attempt failed.");
     }
-    void serviceRecovery()
+    void logRecoveryOutcome()
     {
-        logInputDiagnostics();
-        std::lock_guard lock(mutex);
-        logRecoveryOutcome();
+        std::vector<juce::String> events;
+        {
+            std::lock_guard lock(mutex);
+            collectRecoveryOutcome(events);
+        }
+        for (const auto& message : events) event(message);
+    }
+    // Caller holds mutex. This only updates state and collects writer-owned text.
+    void collectRecoveryEvents(std::vector<juce::String>& events)
+    {
+        collectRecoveryOutcome(events);
         if (stopping || terminalFailure) return;
         if (failedRecoveryAttempts >= 3) { fail(Failure::inputLost); return; }
         if (inputFault.exchange(false))
-            beginRecovery(faultHead, "Input device interrupted");
+            beginRecovery(events, faultHead, "Input device interrupted");
         if (!inputRecovering && monotonicMillis() - lastCallback >= options.callbackTimeout.count())
         {
             auto expected = Failure::none;
             failure.compare_exchange_strong(expected, Failure::inputLost);
-            beginRecovery(head, "Valid input callbacks disappeared", lastProgress);
+            beginRecovery(events, head, "Valid input callbacks disappeared", lastProgress);
         }
         if (recoverySince == 0) return;
         const auto duration = monotonicMillis() - recoverySince;
         if (duration >= options.noProgressTimeout.count())
         {
-            event("Input recovery failed; attempts=" + juce::String(recoveryAttempts.load())
+            events.push_back("Input recovery failed; attempts=" + juce::String(recoveryAttempts.load())
                 + "; no recording progress for " + juce::String(duration) + "ms.");
             fail(Failure::inputLost);
         }
@@ -658,21 +667,35 @@ struct RecordingSession::Impl
             reopenRequested = true;
         }
     }
+    void serviceRecovery()
+    {
+        logInputDiagnostics();
+        std::vector<juce::String> events;
+        {
+            std::lock_guard lock(mutex);
+            collectRecoveryEvents(events);
+        }
+        for (const auto& message : events) event(message);
+    }
     void savedProgress(uint64_t through)
     {
-        std::lock_guard lock(mutex);
-        logRecoveryOutcome();
-        lastProgress = monotonicMillis();
-        if (recoverySince != 0 && through > recoveryThreshold)
+        std::vector<juce::String> events;
         {
-            if (!event("Recovery succeeded; recording gap estimated duration="
-                + juce::String(monotonicMillis() - recoverySince) + "ms; missing audio omitted.")) return;
-            recoverySince = 0; recoveryAttempts = 0; reopenRequested = false;
-            failedRecoveryAttempts = 0;
-            inputRecovering = false;
-            auto expected = State::recovering;
-            state.compare_exchange_strong(expected, State::recording);
+            std::lock_guard lock(mutex);
+            collectRecoveryOutcome(events);
+            lastProgress = monotonicMillis();
+            if (recoverySince != 0 && through > recoveryThreshold)
+            {
+                events.push_back("Recovery succeeded; recording gap estimated duration="
+                    + juce::String(monotonicMillis() - recoverySince) + "ms; missing audio omitted.");
+                recoverySince = 0; recoveryAttempts = 0; reopenRequested = false;
+                failedRecoveryAttempts = 0;
+                inputRecovering = false;
+                auto expected = State::recovering;
+                state.compare_exchange_strong(expected, State::recording);
+            }
         }
+        for (const auto& message : events) event(message);
     }
     RecorderResult updatePreview()
     {
@@ -756,10 +779,7 @@ struct RecordingSession::Impl
         const bool promotionFailed = complete && !promoteWithoutReplacement(partial, final, *io);
         if (promotionFailed) { fail(Failure::promotion); complete = false; }
         logInputDiagnostics();
-        {
-            std::lock_guard lock(mutex);
-            logRecoveryOutcome();
-        }
+        logRecoveryOutcome();
         if (hasErrors) event(complete ? "Recording finalized: " + final.getFileName() : "Recording incomplete: " + partial.getFileName());
         const bool rolling = !stopping && !terminalFailure && rolloverPending;
         if (!rolling) finishLog(log);

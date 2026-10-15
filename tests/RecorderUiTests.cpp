@@ -3,8 +3,11 @@
 #include "localization/SystemLanguages.h"
 #include "FolderWritePermission.h"
 #include "ControlledInputDevice.h"
+#include "OperationGate.h"
 #include <iostream>
 #include <stdexcept>
+#include <atomic>
+#include <thread>
 
 namespace
 {
@@ -598,6 +601,131 @@ void stopInputRecoveryRetainsOutcome(const juce::File& root, const juce::File& e
         ? qfr::incompleteRecordingWarning(1, folder.getFullPathName(), translation) : translation.text(MessageId::Ready)),
         "explicit Refresh reopens the usable input and enables a new recording with any incomplete-recording warning");
 }
+void pausedRecordingLogAllowsStop(const juce::File& root, const qfr::i18n::Translation& translation,
+                                 qfr::DiskOperation pausedOperation, bool stopAndQuit, bool failSaving)
+{
+    using qfr::i18n::MessageId;
+    const auto name = translation.language().tag + "-paused-log-" + juce::String(static_cast<int>(pausedOperation))
+        + (stopAndQuit ? "-quit" : "-stop") + (failSaving ? "-incomplete" : "-saved");
+    const auto folder = root.getChildFile(name);
+    require(folder.createDirectory().wasOk(), "isolate paused-log UI recording");
+    juce::PropertiesFile::Options propertyOptions;
+    propertyOptions.applicationName = "qfr-paused-log-test"; propertyOptions.filenameSuffix = ".settings";
+    juce::PropertiesFile settings(root.getChildFile(name + ".settings"), propertyOptions);
+    settings.setValue("targetFolder", folder.getFullPathName());
+    auto type = std::make_unique<ControlledInputType>();
+    auto& device = *type;
+    OperationGate gate;
+    std::atomic<bool> paused { false };
+    qfr::RecordingSession::Options options;
+    options.callbackTimeout = std::chrono::seconds(30);
+    options.storageRetryInterval = std::chrono::milliseconds(1);
+    options.nativeError = [&](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+    {
+        if (file.hasFileExtension("log") && operation == pausedOperation && !paused.exchange(true)) gate.block();
+        if (failSaving && file.hasFileExtension("flac") && operation == qfr::DiskOperation::flush)
+        {
+           #if JUCE_WINDOWS
+            return ERROR_DISK_FULL;
+           #else
+            return ENOSPC;
+           #endif
+        }
+        return 0;
+    };
+    qfr::RecorderComponent recorder(settings, translation, options, std::move(type));
+    // Release the operation on failure as well. A deadlocked message thread must
+    // fail this test instead of hanging the whole UI suite.
+    struct ReleaseGuard
+    {
+        OperationGate& gate;
+        std::atomic<bool> timedOut { false };
+        std::thread watchdog;
+        explicit ReleaseGuard(OperationGate& value) : gate(value), watchdog([this]
+        {
+            std::unique_lock lock(gate.mutex);
+            if (!gate.changed.wait_for(lock, std::chrono::seconds(3), [&] { return gate.released; }))
+            {
+                timedOut = true;
+                gate.released = true;
+                gate.changed.notify_all();
+            }
+        }) {}
+        ~ReleaseGuard() { gate.release(); watchdog.join(); }
+    } release(gate);
+    recorder.addToDesktop(juce::ComponentPeer::windowIsTemporary); recorder.setVisible(true);
+    auto& prefix = childWithTitle<juce::TextEditor>(recorder, translation.text(MessageId::Prefix));
+    prefix.setText("paused", true);
+    auto& action = actionButton(recorder);
+    auto& status = childWithTitle<juce::Label>(recorder, translation.text(MessageId::StatusTitle));
+    const auto advance = [](int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); };
+    advance(60);
+    require(action.isEnabled(), "controlled JUCE input enables paused-log recording");
+    action.triggerClick(); advance(60);
+    device.sendAudio(); device.disconnect();
+    const bool entered = gate.wait();
+    advance(80);
+    require(entered && !release.timedOut && action.isEnabled() && action.getAction() == qfr::RecordingAction::stop
+        && status.getText() == translation.text(MessageId::Recovering, { { "filename", "paused_01.partial.flac" } }),
+        "native message loop polls input and presents recovery before paused recording-log I/O is released");
+    bool quit = false;
+    if (stopAndQuit)
+    {
+        recorder.requestClose([&] { quit = true; });
+        auto* dialog = dynamic_cast<juce::AlertWindow*>(juce::Component::getCurrentlyModalComponent());
+        require(dialog != nullptr, "Stop and quit confirmation opens while recording-log I/O is paused");
+        juce::TextButton* quitButton = nullptr;
+        for (auto* child : dialog->getChildren())
+            if (auto* button = dynamic_cast<juce::TextButton*>(child); button && button->getButtonText() == translation.text(MessageId::StopAndQuit))
+                quitButton = button;
+        require(quitButton != nullptr, "translated Stop and quit button is available during paused log I/O");
+        quitButton->triggerClick();
+    }
+    else action.triggerClick();
+    advance(80);
+    require(!release.timedOut && !quit && !action.isEnabled() && action.getAction() == qfr::RecordingAction::finalizing,
+        "native Stop dispatches before the paused operation is released and quitting waits for finalization");
+    // Make the same selected input available and deliver audio after Stop. Polling
+    // must neither reopen it automatically nor include this later audio.
+    device.reconnect(); device.sendAudio(); advance(80);
+    require(!quit && !release.timedOut && action.getAction() == qfr::RecordingAction::finalizing,
+        "later input availability and audio cannot bypass Stop or finish an in-flight log operation");
+    gate.release();
+    for (int poll = 0; poll < 200 && action.getAction() != qfr::RecordingAction::record; ++poll) advance(10);
+    require(action.getAction() == qfr::RecordingAction::record && quit == stopAndQuit,
+        "Stop and quit exits only after the released recording truthfully finishes saving");
+    const auto retained = folder.getChildFile(failSaving ? "paused_01.partial.flac" : "paused_01.flac");
+    juce::FlacAudioFormat flac;
+    std::unique_ptr<juce::AudioFormatReader> reader(flac.createReaderFor(retained.createInputStream().release(), true));
+    require(reader != nullptr && reader->lengthInSamples == 512 && reader->sampleRate == 48000 && reader->numChannels == 1,
+        "native Stop preserves all earlier captured frames, rate, and channels and rejects later input");
+    const auto log = folder.getChildFile("paused_01.log").loadFileAsString();
+    const auto saved = translation.text(MessageId::SavedWithErrors, { { "filename", retained.getFileName() },
+        { "path", folder.getChildFile("paused_01.log").getFullPathName() } });
+    const auto containsStatus = [&](const juce::String& text)
+    {
+        return status.getText().toStdString().find(text.toStdString()) != std::string::npos;
+    };
+    require((failSaving ? containsStatus(retained.getFullPathName())
+            && !containsStatus("Saved") && !containsStatus(juce::String::fromUTF8("已保存"))
+            : containsStatus(saved)) && log.contains(failSaving
+        ? "Recording incomplete: paused_01.partial.flac" : "Recording finalized: paused_01.flac")
+        && !folder.getChildFile(failSaving ? "paused_01.flac" : "paused_01.partial.flac").exists(),
+        "bilingual native UI and recording log describe the actual complete or incomplete outcome");
+    advance(80);
+    require(folder.findChildFiles(juce::File::findFiles, false, "*.flac").size() == 1,
+        "Stop leaves no late automatic recording start");
+    recorder.removeFromDesktop();
+}
+void pausedRecordingLogUiChecks(const juce::File& root)
+{
+    for (const auto language : { "en", "zh-Hans" })
+    for (const auto operation : { qfr::DiskOperation::create, qfr::DiskOperation::write, qfr::DiskOperation::flush })
+    for (const bool quit : { false, true })
+    for (const bool failSaving : { false, true })
+        pausedRecordingLogAllowsStop(root, qfr::i18n::Translation({ language }), operation, quit, failSaving);
+    std::cout << "PASS bilingual native Stop and Stop and quit during paused recording-log create/append/flush with complete/incomplete FLAC outcomes\n";
+}
 void nativeCompatibleInputRecovery(const juce::File& root)
 {
     qfr::RecordingSession::Options options;
@@ -648,6 +776,11 @@ int main(int argc, char** argv)
         const auto root = juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("qfr-ui", "", false);
         require(root.createDirectory().wasOk(), "create isolated UI test folder");
         struct Cleanup { juce::File folder; ~Cleanup() { folder.deleteRecursively(); } } cleanup { root };
+        if (args.contains("--log-responsiveness-only"))
+        {
+            pausedRecordingLogUiChecks(root);
+            return 0;
+        }
         controlsPreserveNativeIdentities(root, evidence, qfr::i18n::Translation({ "en" }));
         controlsPreserveNativeIdentities(root, evidence, qfr::i18n::Translation({ "zh-Hans" }));
         auto catalogs = qfr::i18n::productionCatalogs();
@@ -657,6 +790,7 @@ int main(int argc, char** argv)
         iconsDoNotUseCaptions(evidence);
         inputResultsDoNotDependOnLanguage();
         repeatedNativeInputErrorsAreGrouped(root);
+        pausedRecordingLogUiChecks(root);
         for (const auto failure : { qfr::DiskOperation::none, qfr::DiskOperation::flush, qfr::DiskOperation::close })
         {
             stopInputRecoveryRetainsOutcome(root, evidence, qfr::i18n::Translation({ "en" }), failure);
