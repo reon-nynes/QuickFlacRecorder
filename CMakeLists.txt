@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.22)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-project(QuickFlacRecorder VERSION 1.0.0 LANGUAGES C CXX)
+set(QFR_VERSION "1.0.0" CACHE STRING "Application version, including any SemVer prerelease suffix")
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/release.py"
+    version --version "${QFR_VERSION}"
+    OUTPUT_VARIABLE QFR_VERSION_JSON RESULT_VARIABLE QFR_VERSION_RESULT OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT QFR_VERSION_RESULT EQUAL 0)
+    message(FATAL_ERROR "Invalid QFR_VERSION: ${QFR_VERSION}")
+endif()
+string(JSON QFR_NUMERIC_VERSION GET "${QFR_VERSION_JSON}" numeric_version)
+project(QuickFlacRecorder VERSION ${QFR_NUMERIC_VERSION} LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(FetchContent)
@@ -57,10 +66,12 @@ foreach(index RANGE ${QFR_LAST_LANGUAGE})
     string(JSON language GET "${QFR_LANGUAGE_REGISTRY}" ${index} tag)
     string(APPEND QFR_LOCALIZATION_PLIST "<string>${language}</string>")
 endforeach()
-string(APPEND QFR_LOCALIZATION_PLIST "</array></dict></plist>")
+string(APPEND QFR_LOCALIZATION_PLIST "</array><key>QFRApplicationVersion</key><string>${QFR_VERSION}</string></dict></plist>")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${QFR_CATALOG_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/src/localization/languages.json")
 
 juce_add_gui_app(QuickFlacRecorder
+    VERSION "${QFR_NUMERIC_VERSION}"
+    BUILD_VERSION "${QFR_NUMERIC_VERSION}"
     PRODUCT_NAME "QuickFlacRecorder"
     COMPANY_NAME "reon-nynes"
     BUNDLE_ID "com.reon-nynes.quickflacrecorder"
@@ -68,6 +79,13 @@ juce_add_gui_app(QuickFlacRecorder
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "${QFR_MICROPHONE_USAGE}")
 target_sources(QuickFlacRecorder PRIVATE src/Main.cpp src/RecorderComponent.cpp src/RecordingPresentation.cpp)
+target_compile_definitions(QuickFlacRecorder PRIVATE QFR_APPLICATION_VERSION="${QFR_VERSION}")
+if(WIN32)
+    string(REPLACE "." "," QFR_WINDOWS_VERSION "${QFR_NUMERIC_VERSION}")
+    configure_file(packaging/QuickFlacRecorder.rc.in "${CMAKE_CURRENT_BINARY_DIR}/QuickFlacRecorder.rc" @ONLY)
+    target_compile_definitions(QuickFlacRecorder PRIVATE
+        JUCE_USER_DEFINED_RC_FILE="${CMAKE_CURRENT_BINARY_DIR}/QuickFlacRecorder.rc")
+endif()
 target_link_libraries(QuickFlacRecorder PRIVATE QuickFlacRecorderInput QuickFlacRecorderTranslation juce::juce_gui_extra)
 if(APPLE)
     # The OS reads this explanation before the application can render its UI.
@@ -92,6 +110,8 @@ target_link_libraries(RecorderInputCheck PRIVATE QuickFlacRecorderInput QuickFla
 
 include(CTest)
 if(BUILD_TESTING)
+    add_test(NAME RecorderReleaseTests COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+        -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p test_release.py)
     add_executable(RecorderTranslationTests tests/TranslationTests.cpp)
     target_link_libraries(RecorderTranslationTests PRIVATE QuickFlacRecorderTranslation)
     add_test(NAME RecorderTranslationTests COMMAND RecorderTranslationTests)

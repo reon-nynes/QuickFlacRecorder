@@ -1,4 +1,4 @@
-name: Build and package previews
+name: Build, package, and release
 
 on:
   push:
@@ -12,15 +12,44 @@ permissions:
 
 concurrency:
   group: preview-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
-  windows:
-    runs-on: windows-2022
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate version before platform builds
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            python3 scripts/release.py version --tag "$GITHUB_REF_NAME" --github-output "$GITHUB_OUTPUT"
+          else
+            python3 scripts/release.py version --version 1.0.0 --github-output "$GITHUB_OUTPUT"
+          fi
+      - name: Check release tooling
+        run: |
+          python3 -m pip install --disable-pip-version-check -r tests/requirements-release.txt
+          python3 -B -m unittest discover -s tests -p 'test_release*.py'
+
+  windows:
+    needs: prepare
+    runs-on: windows-2022
+    env:
+      QFR_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Configure Windows x64 with static runtime
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON "-DQFR_VERSION=$env:QFR_VERSION"
       - name: Build
         run: cmake --build build --config Release --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
       - name: Check recording, localization, and native controls
@@ -28,38 +57,62 @@ jobs:
       - name: Inspect and package the executable
         shell: pwsh
         run: ./scripts/package-windows.ps1 -BuildDirectory build
+      - name: Record package provenance for tag publication
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: python scripts/release.py manifest --tag "$env:GITHUB_REF_NAME" --commit "$env:SOURCE_COMMIT" --run-id "$env:GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-windows-x64.zip
       - name: Upload unsigned preview and inspection evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: QuickFlacRecorder-windows-x64
-          path: dist/QuickFlacRecorder-windows-x64.zip
+          path: |
+            dist/QuickFlacRecorder-windows-x64.zip
+            dist/QuickFlacRecorder-windows-x64.zip.json
           if-no-files-found: error
           retention-days: 30
 
   macos:
+    needs: prepare
     runs-on: macos-14
+    env:
+      QFR_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Configure macOS 12 universal app
         run: >-
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
           '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64' -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+          "-DQFR_VERSION=$QFR_VERSION"
       - name: Build
         run: cmake --build build --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
       - name: Check recording, localization, and native controls on the runner architecture
         run: ctest --test-dir build --output-on-failure --no-tests=error
       - name: Inspect and package the universal app
         run: bash scripts/package-macos.sh build
+      - name: Record package provenance for tag publication
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: python3 scripts/release.py manifest --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-macos-universal.zip
       - name: Upload unsigned preview and inspection evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: QuickFlacRecorder-macos-universal
-          path: dist/QuickFlacRecorder-macos-universal.zip
+          path: |
+            dist/QuickFlacRecorder-macos-universal.zip
+            dist/QuickFlacRecorder-macos-universal.zip.json
           if-no-files-found: error
           retention-days: 30
 
   linux:
+    needs: prepare
     runs-on: ubuntu-24.04
+    env:
+      QFR_VERSION: ${{ needs.prepare.outputs.version }}
     container: ubuntu:22.04
     defaults:
       run:
@@ -72,8 +125,11 @@ jobs:
             pkg-config libasound2-dev libjack-jackd2-dev libfreetype6-dev libfontconfig1-dev \
             libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libxi-dev libgl1-mesa-dev xvfb xauth file
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Configure Linux x64
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON "-DQFR_VERSION=$QFR_VERSION"
       - name: Build
         run: cmake --build build --target QuickFlacRecorder RecorderSessionTests RecorderTranslationTests RecorderPresentationTests RecorderUiTests --parallel 2
       - name: Check recording, localization, and native controls
@@ -82,11 +138,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/package-linux.sh build
+      - name: Record package provenance for tag publication
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: python3 scripts/release.py manifest --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-linux-x64.tar.gz
       - name: Upload unsigned preview
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: QuickFlacRecorder-linux-x64
-          path: dist/QuickFlacRecorder-linux-x64.tar.gz
+          path: |
+            dist/QuickFlacRecorder-linux-x64.tar.gz
+            dist/QuickFlacRecorder-linux-x64.tar.gz.json
           if-no-files-found: error
           retention-days: 30
 
@@ -104,6 +167,9 @@ jobs:
           apt-get install -y --no-install-recommends git ca-certificates python3 binutils file xvfb xauth \
             libasound2 libfontconfig1 libfreetype6 libx11-6 libxext6 libxinerama1 libxrandr2 libxcursor1 libxi6 libgl1
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: QuickFlacRecorder-linux-x64
@@ -118,3 +184,35 @@ jobs:
           path: dist/linux-baseline.txt
           if-no-files-found: error
           retention-days: 30
+
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [prepare, windows, macos, linux, linux-baseline]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: QuickFlacRecorder-windows-x64
+          path: dist/windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: QuickFlacRecorder-macos-universal
+          path: dist/macos
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: QuickFlacRecorder-linux-x64
+          path: dist/linux
+      - name: Publish complete verified release without replacing downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: >-
+          python3 scripts/release.py publish --repository "$RELEASE_REPOSITORY"
+          --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --packages dist

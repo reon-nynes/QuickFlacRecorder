@@ -1,8 +1,8 @@
-# Launch an unsigned preview
+# Launch a portable download
 
-Download the artifact for your operating system from a successful [build and package workflow run](https://github.com/reon-nynes/QuickFlacRecorder/actions/workflows/preview.yml). Use the run associated with the draft pull request's implementation commit. Extract GitHub's outer artifact archive, then extract the platform archive inside it. The platform archive contains the portable application, this guide, licenses, source, and a SHA-256 record. Workflow artifacts require GitHub sign-in and expire after 30 days.
+Download the package for your operating system from [GitHub Releases](https://github.com/reon-nynes/QuickFlacRecorder/releases) and extract it. For a branch or pull-request preview, download the artifact from its successful [workflow run](https://github.com/reon-nynes/QuickFlacRecorder/actions/workflows/preview.yml), extract GitHub's outer artifact archive, then extract the platform archive inside it. Each platform archive contains the portable application, this guide, licenses, source, and a SHA-256 record. Workflow artifacts require GitHub sign-in and expire after 30 days; public release downloads do not.
 
-These are review builds. They have no publisher certificate or macOS notarization. A public release follows the owner's review of the working Windows build. The [acceptance record](acceptance.md) tracks actual checks. Package inspection and CI success do not replace real microphone, permission, or device checks.
+Both previews and releases have no publisher certificate or macOS notarization. A valid version-tag push approves public release after every required CI job passes. The [release guide](releases.md) explains that policy and the [acceptance record](acceptance.md) tracks actual checks. Package inspection and CI success do not replace real microphone, permission, or device checks.
 
 ## Windows 10/11 x64
 

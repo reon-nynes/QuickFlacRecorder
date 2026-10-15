@@ -4,7 +4,7 @@ Record results for the exact source commit and binary SHA-256. An unchecked item
 
 The [issue #11 recovery validation report](validation/recovery.md) records bilingual validation/failure/recovery evidence and explicit pending platform checks.
 
-The owner reviews the working Windows build and draft pull request before a public release. The CI rows link to the current PR's live check results. A successful job and its downloadable artifact supply evidence for that job; the job's logs retain failures as well.
+Under the release policy accepted in [issue #15](https://github.com/reon-nynes/QuickFlacRecorder/issues/15), the owner's valid version-tag push approves publication after all platform and Linux baseline checks pass. This supersedes the initial separate working-build review requirement. The CI rows below retain the initial implementation's evidence links. A successful job and its downloadable artifact supply evidence for that job; the job's logs retain failures as well.
 
 ## Build evidence
 
@@ -88,4 +88,4 @@ Issue #12's [recording reliability validation](validation/reliability.md) record
 
 For each completed check, add the date, platform/version, source commit, binary hash, device/audio-driver details when relevant, result, and a link or path to the output or observation. Keep failed and partial outcomes visible. Do not mark unrelated checks complete because one platform passed.
 
-Public-release review remains pending until the owner reviews the working build. The workflow produces review artifacts and does not publish a public release.
+The workflow retains branch and PR review artifacts and publishes complete public downloads for approved version-tag pushes. See [releases.md](releases.md) for version validation, permissions, and rerun behavior. Outstanding native checks above remain pending independently of release publication.

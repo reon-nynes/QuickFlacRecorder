@@ -14,7 +14,7 @@ Build a free, public, open-source JUCE desktop app with a dark 600 by 400 logica
 
 Each Record/Stop cycle creates one mono or stereo FLAC in the target folder. The app generates a new editable local date/time recording prefix at launch and retains that prefix across takes. It appends a counter that is one greater than the highest occupied counter for that exact prefix. Both complete and incomplete recordings occupy counters. The app reserves names without replacing files and finalizes recordings before allowing another take.
 
-Deliver a working local Windows build, automated behavior checks, build/package CI for all three platforms, unsigned preview artifacts, and an implementation branch with a draft pull request. A public release follows the user's review of the working build.
+Deliver a working local Windows build, automated behavior checks, build/package CI for all three platforms, unsigned preview artifacts, and an implementation branch with a draft pull request. The release policy accepted in [issue #15](https://github.com/reon-nynes/QuickFlacRecorder/issues/15) supersedes the initial separate working-build review requirement: a valid version-tag push approves public release after all platform and Linux baseline checks pass. See [releases.md](releases.md).
 
 ## User stories
 
@@ -104,7 +104,7 @@ Deliver a working local Windows build, automated behavior checks, build/package 
 - Target Windows 10/11 x64, macOS 12+ with a universal Intel/Apple Silicon app, and Linux x64 with Ubuntu 22.04+ as the initial tested baseline. Produce a Windows `.exe`, a macOS `.app`, and a Linux AppImage as one portable download per operating system.
 - Bundle the Windows JUCE/FLAC dependencies and use a static C++ runtime. Inspect the resulting executable's dependencies to verify the single-executable goal. Validate the Linux AppImage against its declared baseline rather than assuming a bare Linux executable is portable.
 - Use GitHub Actions to build and package all three platforms. Build Linux in an Ubuntu 22.04 container on a supported runner, with Ubuntu 24.04 as the accepted runner plan, to retain the initial Linux compatibility baseline. Produce unsigned preview artifacts and document platform launch requirements.
-- Prepare source, documentation, and a working Windows build locally first. Preserve the accepted domain documents. Then push a `codex/` implementation branch and open a draft pull request in the existing repository. Attach the created pull request to the Codex chat. Publish a public release only after the user reviews the working build.
+- Prepare source, documentation, and a working Windows build locally first. Preserve the accepted domain documents. Then push a `codex/` implementation branch and open a draft pull request in the existing repository. Attach the created pull request to the Codex chat. Public releases follow the version-tag approval policy in [issue #15](https://github.com/reon-nynes/QuickFlacRecorder/issues/15).
 
 ## Testing decisions
 

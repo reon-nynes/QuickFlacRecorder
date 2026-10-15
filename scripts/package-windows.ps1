@@ -11,6 +11,14 @@ $build = (Resolve-Path -LiteralPath $BuildDirectory).Path
 if (!$JuceSource) { $JuceSource = Join-Path $build '_deps/juce-src' }
 $binary = Join-Path $build 'QuickFlacRecorder_artefacts/Release/QuickFlacRecorder.exe'
 if (!(Test-Path -LiteralPath $binary)) { throw "Missing Release executable: $binary" }
+$configuredVersion = (Select-String -LiteralPath (Join-Path $build 'CMakeCache.txt') -Pattern '^QFR_VERSION:STRING=(.+)$').Matches.Groups[1].Value
+$version = & $Python (Join-Path $PSScriptRoot 'release.py') version --version $configuredVersion | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Configured application version is invalid' }
+$metadata = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($binary)
+$numericVersion = "$($metadata.FileMajorPart).$($metadata.FileMinorPart).$($metadata.FileBuildPart)"
+if ($metadata.FileVersion -ne $version.version -or $metadata.ProductVersion -ne $version.version -or $numericVersion -ne $version.numeric_version) {
+    throw "Executable version metadata does not match configured version $configuredVersion"
+}
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
 $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (!$installation) { throw 'Visual Studio C++ tools are needed to inspect the executable' }
@@ -39,12 +47,12 @@ $destinationPath = if ([System.IO.Path]::IsPathRooted($Destination)) {
 }
 $package = Join-Path $destinationPath 'QuickFlacRecorder-windows-x64'
 New-Item -ItemType Directory -Path $package -Force | Out-Null
-& $Python (Join-Path $PSScriptRoot 'package-common.py') $package --juce-source $JuceSource
+& $Python (Join-Path $PSScriptRoot 'package-common.py') $package --juce-source $JuceSource --build-directory $build
 if ($LASTEXITCODE -ne 0) { throw 'Source/notices packaging failed' }
 Copy-Item -LiteralPath $binary -Destination $package
 & $Python (Join-Path $PSScriptRoot 'verify-translations.py') (Join-Path $package 'QuickFlacRecorder.exe') --report (Join-Path $package 'localization-resources.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Embedded localization resource inspection failed' }
-@("Windows x64 Release dependency inspection", "", $headers, "", $dependencies) | Set-Content -LiteralPath (Join-Path $package 'windows-dependencies.txt')
+@("Windows x64 Release dependency inspection", "Application version: $configuredVersion", "Numeric file version: $numericVersion", "", $headers, "", $dependencies) | Set-Content -LiteralPath (Join-Path $package 'windows-dependencies.txt')
 Get-FileHash -LiteralPath $binary -Algorithm SHA256 | Format-List | Out-String | Set-Content -LiteralPath (Join-Path $package 'SHA256.txt')
 $archive = Join-Path $destinationPath 'QuickFlacRecorder-windows-x64.zip'
 Compress-Archive -Path (Join-Path $package '*') -DestinationPath $archive -Force

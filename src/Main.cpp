@@ -34,7 +34,7 @@ class Application final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "QuickFlacRecorder"; }
-    const juce::String getApplicationVersion() override { return "1.0.0"; }
+    const juce::String getApplicationVersion() override { return QFR_APPLICATION_VERSION; }
     bool moreThanOneInstanceAllowed() override { return true; }
 
     void initialise(const juce::String&) override

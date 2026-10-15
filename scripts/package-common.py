@@ -14,7 +14,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
     parser.add_argument("--juce-source", type=Path, required=True)
+    parser.add_argument("--build-directory", type=Path, required=True)
     args = parser.parse_args()
+    cache = (args.build_directory / "CMakeCache.txt").read_text(encoding="utf-8")
+    configured_version = re.search(r"^QFR_VERSION:STRING=(.+)$", cache, re.MULTILINE)
+    if not configured_version:
+        parser.error("Build directory does not record an application version; reconfigure before packaging")
+    application_version = configured_version[1].strip()
     root = Path(__file__).resolve().parent.parent
     juce = args.juce_source.resolve()
     if not (juce / "LICENSE.md").is_file() or not (juce / "modules").is_dir():
@@ -75,11 +81,13 @@ def main():
                 output.write(source, "QuickFlacRecorder/vendor/JUCE/" + relative.as_posix())
     (destination / "SOURCE.txt").write_text(
         f"QuickFlacRecorder commit: {commit}\n"
+        f"Application version: {application_version}\n"
         "JUCE version: 9.0.3\n"
         f"Corresponding application and JUCE source: {source_name}\n"
         "Source, build/packaging scripts, and notices are in the source archive.\n"
         "Build without fetching JUCE by adding this CMake configure argument:\n"
         "  -DFETCHCONTENT_SOURCE_DIR_JUCE=<absolute path to vendor/JUCE>\n"
+        f"  -DQFR_VERSION={application_version}\n"
         "See docs/build.md in the extracted source for platform prerequisites.\n"
         "For bundled Linux libraries, also see licenses/Ubuntu and linux-library-sources.txt.\n",
         encoding="utf-8")

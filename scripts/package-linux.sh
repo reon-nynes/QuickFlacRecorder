@@ -9,7 +9,7 @@ package="$destination/QuickFlacRecorder-linux-x64"
 [[ -x "$binary" ]] || { echo "Missing Release executable: $binary" >&2; exit 1; }
 [[ $(uname -m) == x86_64 ]] || { echo 'The AppImage package targets Linux x64' >&2; exit 1; }
 mkdir -p "$package"
-python3 "$repo/scripts/package-common.py" "$package" --juce-source "$juce"
+python3 "$repo/scripts/package-common.py" "$package" --juce-source "$juce" --build-directory "$build"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 download() {
