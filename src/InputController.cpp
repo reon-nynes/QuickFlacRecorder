@@ -4,7 +4,8 @@
 
 namespace qfr
 {
-InputController::InputController(RecordingSession& recordingSession) : session(recordingSession)
+InputController::InputController(RecordingSession& recordingSession, std::unique_ptr<juce::AudioIODeviceType> suppliedType)
+    : session(recordingSession)
 {
     const auto add = [this](juce::AudioIODeviceType* type)
     {
@@ -15,6 +16,11 @@ InputController::InputController(RecordingSession& recordingSession) : session(r
             type->addListener(this);
         }
     };
+    if (suppliedType)
+    {
+        add(suppliedType.release());
+        return;
+    }
    #if JUCE_WINDOWS
     add(juce::AudioIODeviceType::createAudioIODeviceType_WASAPI(juce::WASAPIDeviceMode::shared));
     add(juce::AudioIODeviceType::createAudioIODeviceType_WASAPI(juce::WASAPIDeviceMode::exclusive));

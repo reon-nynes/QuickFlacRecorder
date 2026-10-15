@@ -2,6 +2,7 @@
 #include "RecorderComponent.h"
 #include "localization/SystemLanguages.h"
 #include "FolderWritePermission.h"
+#include "ControlledInputDevice.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -483,6 +484,120 @@ void repeatedNativeInputErrorsAreGrouped(const juce::File& root)
         && log.indexOf("repeated native callback failure") == log.lastIndexOf("repeated native callback failure"),
         "identical callback errors retain the original detail and log a grouped count without polling duplicates");
 }
+void stopInputRecoveryRetainsOutcome(const juce::File& root, const juce::File& evidence,
+                                    const qfr::i18n::Translation& translation, qfr::DiskOperation failure)
+{
+    using qfr::i18n::MessageId;
+    const bool failedFlush = failure == qfr::DiskOperation::flush, failedLog = failure == qfr::DiskOperation::close;
+    const auto name = translation.language().tag + "-stop-input-recovery" + (failedFlush ? "-flush" : failedLog ? "-log" : "-saved");
+    const auto folder = root.getChildFile(name);
+    require(folder.createDirectory().wasOk(), "create isolated recovery recording folder");
+    juce::PropertiesFile::Options propertyOptions;
+    propertyOptions.applicationName = "qfr-stop-recovery-test"; propertyOptions.filenameSuffix = ".settings";
+    juce::PropertiesFile settings(root.getChildFile(name + ".settings"), propertyOptions);
+    settings.setValue("targetFolder", folder.getFullPathName());
+    const auto prefix = juce::String::fromUTF8("录音 {original}");
+    auto type = std::make_unique<ControlledInputType>();
+    auto& device = *type;
+    qfr::RecordingSession::Options options;
+    options.callbackTimeout = std::chrono::seconds(5);
+    options.storageRetryInterval = std::chrono::milliseconds(10);
+    options.nativeError = [=](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+    {
+        if (operation != failure || !(failedFlush ? file.getFileName().endsWith(".partial.flac") : file.hasFileExtension("log"))) return 0;
+       #if JUCE_WINDOWS
+        return ERROR_DISK_FULL;
+       #else
+        return ENOSPC;
+       #endif
+    };
+    qfr::RecorderComponent recorder(settings, translation, options, std::move(type));
+    auto& configuration = childWithTitle<juce::TextEditor>(recorder, translation.text(MessageId::Prefix));
+    configuration.setText(prefix, true);
+    auto& action = actionButton(recorder);
+    auto& status = childWithTitle<juce::Label>(recorder, translation.text(MessageId::StatusTitle));
+    const auto advance = [](int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); };
+    advance(60);
+    require(action.isEnabled(), "controlled JUCE input enables Record");
+    action.triggerClick(); advance(60);
+    device.sendAudio();
+    device.disconnect();
+    const auto recovering = translation.text(MessageId::Recovering, { { "filename", prefix + "_01.partial.flac" } });
+    for (int poll = 0; poll < 100 && status.getText() != recovering; ++poll) advance(10);
+    require(status.getText() == recovering && action.getAction() == qfr::RecordingAction::stop && action.isEnabled(),
+        "unavailable input enters recovery with Stop available");
+    action.triggerClick();
+    for (int poll = 0; poll < 100 && action.getAction() != qfr::RecordingAction::record; ++poll) advance(10);
+    const auto saved = folder.getChildFile(prefix + "_01.flac");
+    const auto retained = failedFlush ? folder.getChildFile(prefix + "_01.partial.flac") : saved;
+    const auto log = saved.withFileExtension("log");
+    require(retained.existsAsFile() && log.existsAsFile() && (failedFlush ? !saved.exists() : !folder.getChildFile(prefix + "_01.partial.flac").exists()),
+        "Stop retains the actual recording filename and accompanying log according to finalization");
+    // The outcome precedes the separately localized guidance for the next recording.
+    const auto outcome = status.getText().upToFirstOccurrenceOf(translation.language().tag == "en"
+        ? juce::String(" The next recording is unavailable.") : juce::String::fromUTF8(" 目前无法开始下一次录音。"), false, false);
+    if (failure == qfr::DiskOperation::none)
+        require(outcome == translation.text(MessageId::SavedWithErrors,
+            { { "filename", saved.getFileName() }, { "path", log.getFullPathName() } }),
+            "Stop retains Saved with recording errors, original saved filename, and recording-log path");
+    else
+    {
+        const auto diagnostic = qfr::resultMessage({ qfr::ErrorCode::none, {}, {}, {},
+           #if JUCE_WINDOWS
+            { failure, ERROR_DISK_FULL, {} }
+           #else
+            { failure, ENOSPC, {} }
+           #endif
+        }, translation);
+        const auto contains = [&](const juce::String& value) { return outcome.toStdString().find(value.toStdString()) != std::string::npos; };
+        require(contains(retained.getFullPathName()) && !contains("Saved")
+            && !contains(juce::String::fromUTF8("已保存")) && contains(diagnostic.trim()),
+            "failed finalization retains the actual recording and native disk operation/code without claiming success");
+        require(failedLog ? outcome.contains(log.getFullPathName()) : outcome.contains("Original native input {diagnostic}"),
+            "required-log failure identifies its path and failed finalization retains native input detail");
+    }
+    const auto assertOutcome = [&]
+    {
+        require(status.getText().toStdString().find(outcome.toStdString()) != std::string::npos,
+            "passive input and configuration changes preserve the completed recording outcome");
+        require(status.getTooltip() == status.getText() && status.getDescription() == status.getText(),
+            "tooltip and accessible description expose the complete retained outcome and guidance");
+    };
+    assertOutcome();
+    const auto nextUnavailable = translation.language().tag == "en" ? juce::String("The next recording is unavailable.")
+        : juce::String::fromUTF8("目前无法开始下一次录音。");
+    require(!action.isEnabled() && status.getText().contains(nextUnavailable)
+        && status.getText().contains(device.deviceName), "input guidance accompanies the outcome and keeps Record disabled");
+    juce::FlacAudioFormat flac;
+    std::unique_ptr<juce::AudioFormatReader> reader(flac.createReaderFor(retained.createInputStream().release(), true));
+    require(reader != nullptr && reader->lengthInSamples == 512 && reader->sampleRate == 48000,
+        "Stop drains captured audio into a readable FLAC");
+    reader.reset();
+    require(log.loadFileAsString().contains("Original native input {diagnostic}"), "real recording log retains native input diagnostic");
+    writeImage(recorder, evidence, name + "-1.5", 1.5f);
+    advance(1100); assertOutcome();
+    require(!action.isEnabled(), "passive polling retains outcome and blocks unavailable input");
+    const auto moved = folder.getSiblingFile(name + "-moved");
+    require(folder.moveFileTo(moved), "temporarily remove the target folder after Stop");
+    advance(1100); assertOutcome();
+    require(status.getText().contains(device.deviceName)
+        && status.getText().contains(qfr::resultMessage({ qfr::ErrorCode::folderMissing }, translation)),
+        "simultaneous input and configuration guidance accompanies the retained outcome");
+    require(moved.moveFileTo(folder), "restore target folder after passive validation");
+    advance(1100); assertOutcome();
+    device.reconnect(); advance(80); assertOutcome();
+    require(!action.isEnabled(), "device listing alone does not make an unopened input usable");
+    configuration.setText("next-take", true); advance(80);
+    require(status.getText().toStdString().find(outcome.toStdString()) == std::string::npos,
+        "explicit configuration may clear the completed outcome");
+    for (auto* child : recorder.getChildren())
+        if (auto* button = dynamic_cast<juce::TextButton*>(child); button && button->getButtonText() == translation.text(MessageId::Refresh))
+            button->triggerClick();
+    advance(80);
+    require(action.isEnabled() && status.getText() == (failedFlush
+        ? qfr::incompleteRecordingWarning(1, folder.getFullPathName(), translation) : translation.text(MessageId::Ready)),
+        "explicit Refresh reopens the usable input and enables a new recording with any incomplete-recording warning");
+}
 void nativeCompatibleInputRecovery(const juce::File& root)
 {
     qfr::RecordingSession::Options options;
@@ -542,6 +657,12 @@ int main(int argc, char** argv)
         iconsDoNotUseCaptions(evidence);
         inputResultsDoNotDependOnLanguage();
         repeatedNativeInputErrorsAreGrouped(root);
+        for (const auto failure : { qfr::DiskOperation::none, qfr::DiskOperation::flush, qfr::DiskOperation::close })
+        {
+            stopInputRecoveryRetainsOutcome(root, evidence, qfr::i18n::Translation({ "en" }), failure);
+            stopInputRecoveryRetainsOutcome(root, evidence, qfr::i18n::Translation({ "zh-Hans" }), failure);
+        }
+        std::cout << "PASS bilingual Stop during unavailable-input recovery retains saved/failed outcomes and next-recording guidance\n";
         std::cout << "PASS bilingual controls, native identities, and caption-independent icons\n";
         if (args.contains("--native-fault-recovery")) nativeCompatibleInputRecovery(root);
         if (args.contains("--native-incomplete"))

@@ -26,7 +26,8 @@ class RecorderComponent final : public juce::Component,
                                 private juce::KeyListener
 {
 public:
-    RecorderComponent(juce::PropertiesFile&, i18n::Translation, RecordingSession::Options = {});
+    RecorderComponent(juce::PropertiesFile&, i18n::Translation, RecordingSession::Options = {},
+                      std::unique_ptr<juce::AudioIODeviceType> = {});
     ~RecorderComponent() override;
     void paint(juce::Graphics&) override;
     void resized() override;

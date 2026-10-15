@@ -102,8 +102,9 @@ void LevelMeter::paint(juce::Graphics& g)
     g.drawText("0 dBFS", barX + barWidth - 50, 48, 50, 16, juce::Justification::right);
 }
 
-RecorderComponent::RecorderComponent(juce::PropertiesFile& settings, i18n::Translation selected, RecordingSession::Options options)
-    : preferences(settings), translation(std::move(selected)), session(std::move(options))
+RecorderComponent::RecorderComponent(juce::PropertiesFile& settings, i18n::Translation selected, RecordingSession::Options options,
+                                     std::unique_ptr<juce::AudioIODeviceType> suppliedType)
+    : preferences(settings), translation(std::move(selected)), session(std::move(options)), input(session, std::move(suppliedType))
 {
     setLookAndFeel(&lookAndFeel);
     setWantsKeyboardFocus(true);
@@ -386,22 +387,18 @@ void RecorderComponent::updateStatus()
     auto message = recordingStatus(snapshot, translation);
     auto colour = theme::muted;
     const bool terminal = snapshot.state == RecordingSession::State::failed || snapshot.state == RecordingSession::State::succeeded;
-    if (terminal && configurationError.failed())
+    if (terminal)
     {
-        message = translation.text(MessageId::NextRecordingUnavailable,
-            { { "outcome", message }, { "guidance", resultMessage(configurationError, translation) } });
-        colour = theme::danger;
-    }
-    else if (snapshot.state == RecordingSession::State::failed)
-    {
-        colour = theme::danger;
+        juce::StringArray guidance;
+        if (inputError.failed()) guidance.add(resultMessage(inputError, translation));
+        if (configurationError.failed()) guidance.add(resultMessage(configurationError, translation));
+        if (!guidance.isEmpty())
+            message = translation.text(MessageId::NextRecordingUnavailable,
+                { { "outcome", message }, { "guidance", guidance.joinIntoString(" ") } });
+        colour = snapshot.state == RecordingSession::State::failed || !guidance.isEmpty() ? theme::danger : theme::meter;
     }
     else if (! locked && inputError.failed()) { message = resultMessage(inputError, translation); colour = theme::danger; }
     else if (! locked && configurationError.failed()) { message = resultMessage(configurationError, translation); colour = theme::danger; }
-    else if (snapshot.state == RecordingSession::State::succeeded)
-    {
-        colour = theme::meter;
-    }
     else if (! locked && incompleteRecordings > 0)
     {
         message = incompleteRecordingWarning(incompleteRecordings, targetFolder.getText(), translation);

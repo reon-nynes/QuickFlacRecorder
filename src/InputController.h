@@ -16,7 +16,8 @@ class InputController final : private juce::AudioIODeviceCallback,
                               private juce::AsyncUpdater
 {
 public:
-    explicit InputController(RecordingSession&);
+    // An optional native device type replaces platform discovery at the device boundary.
+    explicit InputController(RecordingSession&, std::unique_ptr<juce::AudioIODeviceType> = {});
     ~InputController() override;
 
     juce::StringArray drivers() const;
