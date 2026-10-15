@@ -20,6 +20,13 @@ FetchContent_Declare(JUCE
 FetchContent_MakeAvailable(JUCE)
 find_package(Threads REQUIRED)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(X11 REQUIRED)
+    add_library(QuickFlacRecorderX11 STATIC src/X11Startup.cpp)
+    target_include_directories(QuickFlacRecorderX11 PUBLIC src)
+    target_link_libraries(QuickFlacRecorderX11 PUBLIC X11::X11)
+endif()
+
 file(GLOB QFR_CATALOG_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/localization/catalogs/*.json")
 juce_add_binary_data(QuickFlacRecorderCatalogs HEADER_NAME TranslationResources.h NAMESPACE qfr::i18n::resources
     SOURCES src/localization/languages.json ${QFR_CATALOG_FILES})
@@ -87,6 +94,9 @@ if(WIN32)
         JUCE_USER_DEFINED_RC_FILE="${CMAKE_CURRENT_BINARY_DIR}/QuickFlacRecorder.rc")
 endif()
 target_link_libraries(QuickFlacRecorder PRIVATE QuickFlacRecorderInput QuickFlacRecorderTranslation juce::juce_gui_extra)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(QuickFlacRecorder PRIVATE QuickFlacRecorderX11)
+endif()
 if(APPLE)
     # The OS reads this explanation before the application can render its UI.
     # Derive localized bundle resources from the same complete catalogs.
@@ -120,6 +130,9 @@ if(BUILD_TESTING)
     add_test(NAME RecorderPresentationTests COMMAND RecorderPresentationTests)
     add_executable(RecorderUiTests tests/RecorderUiTests.cpp src/RecorderComponent.cpp src/RecordingPresentation.cpp)
     target_link_libraries(RecorderUiTests PRIVATE QuickFlacRecorderInput QuickFlacRecorderTranslation juce::juce_gui_extra)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_libraries(RecorderUiTests PRIVATE QuickFlacRecorderX11)
+    endif()
     add_test(NAME RecorderUiTests COMMAND RecorderUiTests)
     add_executable(RecorderSessionTests tests/RecordingSessionTests.cpp)
     target_link_libraries(RecorderSessionTests PRIVATE QuickFlacRecorderSession)

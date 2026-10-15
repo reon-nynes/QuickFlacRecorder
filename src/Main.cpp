@@ -1,6 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "RecorderComponent.h"
 #include "localization/SystemLanguages.h"
+#include "X11Startup.h"
+
+#if defined(__linux__)
+namespace
+{
+// START_JUCE_APPLICATION initializes JUCE's X11 backend before Application::initialise,
+// so the atom must be registered during static startup.
+const auto x11PreparedForJuce = []
+{
+    qfr::prepareX11ForJuce();
+    return true;
+}();
+}
+#endif
 
 namespace qfr
 {

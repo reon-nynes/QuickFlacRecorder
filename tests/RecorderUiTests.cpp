@@ -4,6 +4,7 @@
 #include "FolderWritePermission.h"
 #include "ControlledInputDevice.h"
 #include "OperationGate.h"
+#include "X11Startup.h"
 #include <iostream>
 #include <stdexcept>
 #include <atomic>
@@ -765,6 +766,9 @@ void nativeCompatibleInputRecovery(const juce::File& root)
 }
 int main(int argc, char** argv)
 {
+#if defined(__linux__)
+    qfr::prepareX11ForJuce();
+#endif
     juce::ScopedJuceInitialiser_GUI gui;
     try
     {
