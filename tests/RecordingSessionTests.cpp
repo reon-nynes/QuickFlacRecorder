@@ -864,6 +864,174 @@ void stopCancelsRolloverWhileThePriorFileFinishes()
         && !folder.file.getChildFile("take_02.partial.flac").exists() && !folder.file.getChildFile("take_02.flac").exists(),
         "Stop during rollover prevents any later automatic file start or device recovery");
 }
+struct OperationGate
+{
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool entered = false, released = false;
+    void block()
+    {
+        std::unique_lock lock(mutex);
+        entered = true;
+        changed.notify_all();
+        changed.wait(lock, [&] { return released; });
+    }
+    bool wait()
+    {
+        std::unique_lock lock(mutex);
+        return changed.wait_for(lock, std::chrono::seconds(2), [&] { return entered; });
+    }
+    void release()
+    {
+        std::lock_guard lock(mutex);
+        released = true;
+        changed.notify_all();
+    }
+};
+void stopBeforeRolloverReservationKeepsOnlyThePriorRecording()
+{
+    enum class Boundary { counterSelection, nativeCreate, counterCollision, logCloseFailure };
+    for (const auto boundary : { Boundary::counterSelection, Boundary::nativeCreate, Boundary::counterCollision, Boundary::logCloseFailure })
+    {
+        Folder folder;
+        OperationGate gate;
+        bool occupied = false;
+        qfr::RecordingSession::Options options;
+        options.allocationEntries = [&](const juce::File& target)
+        {
+            auto entries = target.findChildFiles(juce::File::findFilesAndDirectories, false);
+            if (boundary == Boundary::counterSelection && target.getChildFile("take_01.flac").exists()) gate.block();
+            return entries;
+        };
+        options.nativeError = [&](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+        {
+            if (operation == qfr::DiskOperation::create)
+            {
+                if ((boundary == Boundary::nativeCreate || boundary == Boundary::logCloseFailure)
+                    && file.getFileName() == "take_02.partial.flac") gate.block();
+                if (boundary == Boundary::counterCollision && file.getFileName() == "take_02.partial.flac")
+                    occupied = file.replaceWithText("concurrent reservation");
+                if (boundary == Boundary::counterCollision && file.getFileName() == "take_03.partial.flac") gate.block();
+            }
+            if (boundary == Boundary::logCloseFailure && operation == qfr::DiskOperation::close && file.getFileName() == "take_01.log")
+            {
+               #if JUCE_WINDOWS
+                return ERROR_DISK_FULL;
+               #else
+                return ENOSPC;
+               #endif
+            }
+            return 0;
+        };
+        qfr::RecordingSession session(options);
+        require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start Stop before rollover reservation");
+        std::array<float, 512> samples; samples.fill(.25f);
+        const float* inputs[] { samples.data() };
+        session.processInput(inputs, 1, 512);
+        session.inputFormatChanged(44100, 1);
+        const bool entered = gate.wait();
+        session.requestStop();
+        session.processInput(inputs, 1, 512);
+        session.inputFormatChanged(32000, 1);
+        gate.release();
+        session.waitForStop();
+        const auto outcome = session.snapshot();
+        require(entered && outcome.state == (boundary == Boundary::logCloseFailure
+                ? qfr::RecordingSession::State::failed : qfr::RecordingSession::State::succeeded)
+            && outcome.recordingFile == folder.file.getChildFile("take_01.flac") && !outcome.incomplete
+            && outcome.finalization == qfr::RecordingSession::FinalizationOutcome::finalized,
+            "Stop during selection or before native creation preserves the prior finalized recording");
+        require(boundary != Boundary::logCloseFailure || (outcome.failureReason == qfr::RecordingSession::FailureReason::log
+            && outcome.error.disk.operation == qfr::DiskOperation::close && outcome.logFile == folder.file.getChildFile("take_01.log")),
+            "canceled rollover still reports failure to close the prior required recording log");
+        const auto nextName = boundary == Boundary::counterCollision ? "take_03" : "take_02";
+        require(!folder.file.getChildFile(juce::String(nextName) + ".partial.flac").exists()
+            && !folder.file.getChildFile(juce::String(nextName) + ".flac").exists()
+            && !folder.file.getChildFile(juce::String(nextName) + ".log").exists(),
+            "canceled rollover cannot reserve the next recording or create a log for it");
+        require(boundary != Boundary::counterCollision || (occupied
+            && folder.file.getChildFile("take_02.partial.flac").loadFileAsString() == "concurrent reservation"),
+            "exclusive allocation preserves another session's reservation across cancellation");
+        require(decode(outcome.recordingFile)->lengthInSamples == 512 && decode(outcome.recordingFile)->sampleRate == 48000,
+            "canceled rollover drains previously captured audio at its original rate");
+        const auto log = outcome.logFile.loadFileAsString();
+        require(!log.contains("take_02") && !log.contains("take_03") && log.contains("Recording finalized: take_01.flac"),
+            "canceled rollover does not link a recording that was never reserved");
+        session.inputRecoveryFinished({});
+        require(!session.takeInputRecoveryRequest() && session.snapshot().recordingFile == outcome.recordingFile,
+            "Stop rejects late input, input recovery, and rollover notifications");
+    }
+}
+void stopAfterRolloverReservationPreservesItsActualFinalization()
+{
+    for (const int failedFlushes : { 0, 1, 4 })
+    {
+        Folder folder;
+        OperationGate gate;
+        int reservations = 0, flushes = 0;
+        qfr::RecordingSession::Options options;
+        options.storageRetryInterval = std::chrono::milliseconds(1);
+        options.outputAdapter = [&](std::unique_ptr<juce::OutputStream> output)
+        {
+            if (++reservations == 2) gate.block();
+            return output;
+        };
+        options.nativeError = [&](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+        {
+            if (operation == qfr::DiskOperation::flush && file.getFileName() == "take_02.partial.flac"
+                && ++flushes <= failedFlushes)
+            {
+               #if JUCE_WINDOWS
+                return ERROR_DISK_FULL;
+               #else
+                return ENOSPC;
+               #endif
+            }
+            return 0;
+        };
+        qfr::RecordingSession session(options);
+        require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start Stop after rollover reservation");
+        std::array<float, 512> samples; samples.fill(.25f);
+        const float* inputs[] { samples.data() };
+        session.processInput(inputs, 1, 512);
+        session.inputFormatChanged(44100, 1);
+        const bool entered = gate.wait();
+        const bool reserved = folder.file.getChildFile("take_02.partial.flac").existsAsFile();
+        session.requestStop();
+        session.processInput(inputs, 1, 512);
+        session.inputFormatChanged(32000, 1);
+        gate.release();
+        session.waitForStop();
+        const auto outcome = session.snapshot();
+        const bool incomplete = failedFlushes == 4;
+        require(entered && reserved && outcome.incomplete == incomplete
+            && outcome.state == (incomplete ? qfr::RecordingSession::State::failed : qfr::RecordingSession::State::succeeded)
+            && outcome.recordingFile == folder.file.getChildFile(incomplete ? "take_02.partial.flac" : "take_02.flac")
+            && outcome.finalization == (incomplete ? qfr::RecordingSession::FinalizationOutcome::diskFlushFailed
+                                                  : qfr::RecordingSession::FinalizationOutcome::finalized),
+            "Stop after reservation finishes the reserved recording with its actual complete or incomplete outcome");
+        require(failedFlushes == 0 || (outcome.error.disk.operation == qfr::DiskOperation::flush
+            && (incomplete ? flushes == 4 : flushes >= 2)),
+            "Stop preserves native flush diagnostics and applies the accepted storage retry allowance");
+        require(decode(folder.file.getChildFile("take_01.flac"))->lengthInSamples == 512,
+            "Stop after reservation preserves the prior captured audio");
+        if (!incomplete)
+            require(decode(outcome.recordingFile)->lengthInSamples == 0 && decode(outcome.recordingFile)->sampleRate == 44100,
+                "the reserved recording finalizes at its actual rate without accepting input after Stop");
+        const auto oldLog = folder.file.getChildFile("take_01.log").loadFileAsString();
+        const auto newLog = folder.file.getChildFile("take_02.log").loadFileAsString();
+        require(oldLog.contains("take_02") && newLog.contains("take_01")
+            && newLog.contains(incomplete ? "Recording incomplete: take_02.partial.flac" : "Recording finalized: take_02.flac")
+            && (failedFlushes == 0 || newLog.contains("Storage retry")),
+            "reserved rollover recordings retain linked logs, retry diagnostics, and their finalization outcomes");
+        session.inputRecoveryFinished({});
+        session.processInput(inputs, 1, 512);
+        session.inputFormatChanged(32000, 1);
+        require(!session.takeInputRecoveryRequest() && !folder.file.getChildFile("take_03.partial.flac").exists()
+            && !folder.file.getChildFile("take_03.flac").exists() && session.snapshot().recordingFile == outcome.recordingFile,
+            "waiting for Stop leaves no pending recovery or delayed automatic recording start");
+    }
+}
 void failedInputPreservesFinalizableAudioAndReportsIncompleteFinalization()
 {
     Folder folder;
@@ -1292,6 +1460,8 @@ int main(int argc, char** argv)
         }
         if (argc == 2 && juce::String(argv[1]) == "--rollover-only")
         {
+            stopBeforeRolloverReservationKeepsOnlyThePriorRecording();
+            stopAfterRolloverReservationPreservesItsActualFinalization();
             changedInputRateRollsOverAutomaticallyWithLinkedLogs();
             requiredLogCloseFailureDuringRolloverReportsFailureAndFinalizesReservedAudio();
             std::cout << "PASS rate-change rollover and linked recording logs\n";
@@ -1334,6 +1504,8 @@ int main(int argc, char** argv)
         startupStorageRecoveryUsesOnlyTheNewTakesProgress();
         compatibleInputRecoveryKeepsTheRecordingAndResetsOnSavedAudio();
         inputDiagnosticsDuringFinalizationReachTheRecordingLog();
+        stopBeforeRolloverReservationKeepsOnlyThePriorRecording();
+        stopAfterRolloverReservationPreservesItsActualFinalization();
         changedInputRateRollsOverAutomaticallyWithLinkedLogs();
         requiredLogCloseFailureDuringRolloverReportsFailureAndFinalizesReservedAudio();
         cleanRecordingsAndLogCollisionsPreserveExistingFiles();

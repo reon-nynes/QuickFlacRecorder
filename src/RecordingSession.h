@@ -38,6 +38,9 @@ public:
         // platform error simulates its failure. Close always releases the handle.
         // Called only on control/writer threads, never from an audio callback.
         std::function<uint64_t(DiskOperation, const juce::File&)> nativeError;
+        // Optional folder-enumeration adapter for recording filename allocation.
+        // Previews still scan the real target folder. Never called from audio input.
+        std::function<juce::Array<juce::File>(const juce::File&)> allocationEntries;
         std::chrono::milliseconds storageRetryInterval { 1000 };
         std::chrono::milliseconds noProgressTimeout { 10000 };
         std::chrono::milliseconds callbackTimeout { 1000 };

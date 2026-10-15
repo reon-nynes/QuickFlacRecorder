@@ -230,11 +230,16 @@ private:
     std::shared_ptr<IoStatus> status;
 };
 
-enum class CreateResult { created, occupied, failed };
-CreateResult reserve(const juce::File& file, std::shared_ptr<IoStatus> status, std::unique_ptr<juce::OutputStream>& output)
+enum class CreateResult { created, occupied, failed, canceled };
+CreateResult reserve(const juce::File& file, std::shared_ptr<IoStatus> status, std::unique_ptr<juce::OutputStream>& output,
+                     const std::function<bool()>& canceled = {})
 {
     status->file = file;
-    if (auto code = status->injected(DiskOperation::create)) { status->record(DiskOperation::create, code); return CreateResult::failed; }
+    const auto code = status->injected(DiskOperation::create);
+    // Stop can cancel until this synchronous native allocation is admitted.
+    // A successful reservation already in flight must still be finalized.
+    if (canceled && canceled()) return CreateResult::canceled;
+    if (code != 0) { status->record(DiskOperation::create, code); return CreateResult::failed; }
 #if JUCE_WINDOWS
     auto handle = CreateFileW(file.getFullPathName().toWideCharPointer(), GENERIC_WRITE | GENERIC_READ,
                               FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -391,11 +396,13 @@ juce::String numberedName(const juce::String& prefix, uint64_t counter, bool par
     auto number = juce::String(counter).paddedLeft('0', 2);
     return prefix + "_" + number + (partial ? ".partial.flac" : ".flac");
 }
-qfr::RecorderResult nextCounter(const qfr::RecordingSession::Configuration& config, uint64_t& next)
+qfr::RecorderResult nextCounter(const qfr::RecordingSession::Configuration& config, uint64_t& next,
+                              const std::function<juce::Array<juce::File>(const juce::File&)>& entries = {})
 {
     uint64_t highest = 0;
     const auto beginning = config.recordingPrefix + "_";
-    for (const auto& file : config.targetFolder.findChildFiles(juce::File::findFilesAndDirectories, false))
+    for (const auto& file : entries ? entries(config.targetFolder)
+                                  : config.targetFolder.findChildFiles(juce::File::findFilesAndDirectories, false))
     {
         auto name = file.getFileName();
         if (!name.startsWith(beginning)) continue;
@@ -472,20 +479,25 @@ struct RecordingSession::Impl
         bool reserved = false;
     };
 
-    RecorderResult openFile(FileContext& file, double rate)
+    RecorderResult openFile(FileContext& file, double rate, bool rollover = false)
     {
+        const auto canceled = [this, rollover] { return rollover && stopping; };
+        if (canceled()) return {};
         uint64_t next = 1;
-        auto counter = nextCounter(config, next);
+        auto counter = nextCounter(config, next, options.allocationEntries);
+        if (canceled()) return {};
         if (counter.failed()) return counter;
         file.io = std::make_shared<IoStatus>();
         file.io->nativeError = options.nativeError;
         std::unique_ptr<juce::OutputStream> stream;
         for (int attempts = 0; attempts < 10000; ++attempts)
         {
+            if (canceled()) return {};
             file.final = config.targetFolder.getChildFile(numberedName(config.recordingPrefix, next));
             file.partial = config.targetFolder.getChildFile(numberedName(config.recordingPrefix, next, true));
             const auto result = file.final.exists() || file.final.withFileExtension(".log").exists()
-                ? CreateResult::occupied : reserve(file.partial, file.io, stream);
+                ? CreateResult::occupied : reserve(file.partial, file.io, stream, canceled);
+            if (result == CreateResult::canceled) return {};
             if (result == CreateResult::created) { file.reserved = true; break; }
             if (result == CreateResult::failed) return diskResult(ErrorCode::createFailed, *file.io);
             if (next == std::numeric_limits<uint64_t>::max()) return { ErrorCode::counterExhausted };
@@ -794,7 +806,18 @@ struct RecordingSession::Impl
             if (!std::isfinite(nextRate) || nextRate < 1 || nextRate > 655350 || std::floor(nextRate) != nextRate)
             { cancelRollover("Cannot roll over to an invalid input stream rate."); return; }
             FileContext next;
-            const auto opened = openFile(next, nextRate);
+            const auto opened = openFile(next, nextRate, true);
+            if (!next.reserved && stopping)
+            {
+                // Cancellation before reservation keeps the prior file's outcome.
+                finishLog(previousLog);
+                std::lock_guard lock(mutex);
+                view.failureReason = failure;
+                publishLogFailure();
+                endedAt = monotonicMillis();
+                state = terminalFailure ? State::failed : State::succeeded;
+                return;
+            }
             if (opened.failed())
             {
                 eventTo(previousLog, "Recording rollover could not start: " + next.partial.getFileName() + "; " + opened.detail);
