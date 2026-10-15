@@ -578,6 +578,144 @@ int logEventCount(const juce::String& log, const juce::String& message)
         if (line.contains(message)) ++count;
     return count;
 }
+bool waitForLogEvents(const juce::File& logFile, const juce::String& message, int count)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (logEventCount(logFile.loadFileAsString(), message) < count && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    return logEventCount(logFile.loadFileAsString(), message) >= count;
+}
+void delayedReopenCannotConsumeANewInterruptionsAllowance(bool reopened)
+{
+    Folder folder;
+    qfr::RecordingSession::Options options;
+    options.callbackTimeout = std::chrono::seconds(10);
+    options.recoveryInterval = std::chrono::milliseconds(25);
+    options.noProgressTimeout = std::chrono::seconds(5);
+    qfr::RecordingSession session(options);
+    require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start delayed reopen regression");
+    const auto logFile = folder.file.getChildFile("take_01.log");
+    session.inputLost();
+    require(waitForInputRecovery(session), "hold an actual first-interruption reopen result in flight");
+    std::array<float, 512> samples; samples.fill(.25f);
+    const float* inputs[] { samples.data() };
+    session.processInput(inputs, 1, 512);
+    require(waitForLogEvents(logFile, "Recovery succeeded", 1)
+        && session.snapshot().state == qfr::RecordingSession::State::recording
+        && session.snapshot().recoveryAttempts == 0,
+        "saving valid incoming audio resets recovery while the old reopen is still in flight");
+    session.inputLost();
+    require(waitForLogEvents(logFile, "recording gap begins", 2), "observe the second interruption before returning the old result");
+    const auto interrupted = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    require(session.snapshot().recoveryAttempts == 0 && !session.takeInputRecoveryRequest(),
+        "the new interruption cannot overlap the old reopen or count pending attempts");
+    const juce::String oldOutcome = reopened ? "Selected input reopened" : "Selected input recovery attempt failed";
+    const auto oldFailureCount = reopened ? 0 : 1;
+    session.inputRecoveryFinished(reopened ? qfr::RecorderResult {}
+        : qfr::RecorderResult { qfr::ErrorCode::deviceOpenFailed, "original delayed native failure" });
+    require(waitForLogEvents(logFile, oldOutcome, 1)
+        && session.snapshot().state == qfr::RecordingSession::State::recovering
+        && session.snapshot().recoveryAttempts == 0, "the delayed result cannot clear or consume the new interruption");
+    for (unsigned attempt = 1; attempt <= 2; ++attempt)
+    {
+        require(waitForInputRecovery(session) && session.snapshot().recoveryAttempts == attempt,
+            "each new actual reopen starts exactly one attempt of the second interruption");
+        session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "new interruption native failure" });
+        require(waitForLogEvents(logFile, "Selected input recovery attempt failed", static_cast<int>(attempt) + oldFailureCount),
+            "the writer observes each new failed result");
+    }
+    require(session.snapshot().state == qfr::RecordingSession::State::recovering,
+        "two actual failures of the new interruption leave recovery active before its deadline");
+    require(waitForInputRecovery(session) && session.snapshot().recoveryAttempts == 3,
+        "the new interruption retains its third actual attempt");
+    session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "third new interruption native failure" });
+    const auto stopped = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (session.snapshot().controlsLocked() && std::chrono::steady_clock::now() < stopped)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(session.snapshot().state == qfr::RecordingSession::State::failed
+        && std::chrono::steady_clock::now() - interrupted < options.noProgressTimeout,
+        "the third new failure stops capture before the no-progress deadline");
+    session.waitForStop();
+    const auto outcome = session.snapshot();
+    const auto history = logFile.loadFileAsString();
+    auto reader = decode(outcome.recordingFile);
+    juce::AudioBuffer<float> audio(1, 512);
+    require(outcome.failureReason == qfr::RecordingSession::FailureReason::inputLost
+        && outcome.finalization == qfr::RecordingSession::FinalizationOutcome::finalized && !outcome.incomplete
+        && reader->lengthInSamples == 512 && reader->read(&audio, 0, 512, 0, true, false),
+        "input recovery exhaustion preserves and truthfully finalizes the saved FLAC");
+    for (int frame = 0; frame < 512; ++frame)
+        require(std::abs(audio.getSample(0, frame) - .25f) < 1.f / 32768.f, "all saved samples survive the delayed failure");
+    require(logEventCount(history, "Input recovery attempt ") == 4
+        && logEventCount(history, "Selected input recovery attempt failed") == 3 + oldFailureCount
+        && logEventCount(history, "Recovery succeeded") == 1
+        && (reopened || history.contains("original delayed native failure")) && history.contains("third new interruption native failure")
+        && !history.contains("no recording progress") && !session.takeInputRecoveryRequest(),
+        "history retains all actual attempts, original native diagnostics, and the single saved-audio reset");
+    require(logEventCount(history, "Input recovery attempt 1; interruption=1") == 1
+        && history.contains(oldOutcome + "; interruption=1; attempt=1; earlier interruption; current allowance unchanged.")
+        && history.indexOf("Recovery succeeded") < history.indexOf(oldOutcome)
+        && logEventCount(history, "Input recovery attempt 1; interruption=2") == 1
+        && logEventCount(history, "Input recovery attempt 2; interruption=2") == 1
+        && logEventCount(history, "Input recovery attempt 3; interruption=2") == 1
+        && logEventCount(history, "Selected input recovery attempt failed; interruption=2;") == 3,
+        "each start and outcome names its original interruption and attempt after the displayed count resets");
+}
+void oldReopenOutstandingAcrossResetHonorsDeadlineAndStop()
+{
+    for (const bool stop : { false, true })
+    {
+        Folder folder;
+        qfr::RecordingSession::Options options;
+        options.callbackTimeout = std::chrono::seconds(5);
+        options.recoveryInterval = std::chrono::milliseconds(25);
+        options.noProgressTimeout = std::chrono::milliseconds(500);
+        qfr::RecordingSession session(options);
+        require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start cancellation across recovery reset");
+        const auto logFile = folder.file.getChildFile("take_01.log");
+        session.inputLost();
+        require(waitForInputRecovery(session), "hold the original interruption's actual reopen outstanding");
+        std::array<float, 512> samples; samples.fill(-.5f);
+        const float* inputs[] { samples.data() };
+        session.processInput(inputs, 1, 512);
+        require(waitForLogEvents(logFile, "Recovery succeeded", 1) && session.snapshot().recoveryAttempts == 0,
+            "saved audio resets recovery with the old operation still outstanding");
+        const auto interrupted = std::chrono::steady_clock::now();
+        session.inputLost();
+        require(waitForLogEvents(logFile, "recording gap begins", 2), "start a new interruption while the original reopen remains in flight");
+        if (stop) session.requestStop();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (session.snapshot().controlsLocked() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        require(!session.snapshot().controlsLocked(), "Stop or the new no-progress deadline ends recovery without awaiting the old result");
+        session.waitForStop();
+        const auto outcome = session.snapshot();
+        const auto history = logFile.loadFileAsString();
+        auto reader = decode(outcome.recordingFile);
+        juce::AudioBuffer<float> audio(1, 512);
+        require(outcome.state == (stop ? qfr::RecordingSession::State::succeeded : qfr::RecordingSession::State::failed)
+            && outcome.recoveryAttempts == 0 && outcome.finalization == qfr::RecordingSession::FinalizationOutcome::finalized
+            && !outcome.incomplete && reader->lengthInSamples == 512 && reader->read(&audio, 0, 512, 0, true, false)
+            && std::abs(audio.getSample(0, 511) + .5f) < 1.f / 32768.f
+            && logEventCount(history, "Input recovery attempt ") == 1
+            && !history.contains("Selected input recovery attempt failed")
+            && (stop ? !history.contains("no recording progress") : history.contains("attempts=0; no recording progress"))
+            && (stop || std::chrono::steady_clock::now() - interrupted >= options.noProgressTimeout),
+            "the old outstanding operation consumes no new attempts and cannot evade Stop or the deadline; saved samples finalize");
+        session.inputRecoveryFinished({ qfr::ErrorCode::deviceOpenFailed, "late canceled old-interruption failure" });
+        session.inputRecoveryFinished({});
+        session.inputFormatChanged(44100, 1);
+        session.processInput(inputs, 1, 512);
+        const auto later = session.snapshot();
+        require(later.state == outcome.state && later.failureReason == outcome.failureReason
+            && later.finalization == outcome.finalization && later.recordingFile == outcome.recordingFile
+            && later.recoveryAttempts == 0 && logFile.loadFileAsString() == history
+            && !session.takeInputRecoveryRequest() && !folder.file.getChildFile("take_02.partial.flac").exists()
+            && !folder.file.getChildFile("take_02.flac").exists() && !folder.file.getChildFile("take_02.log").exists(),
+            "late old results and format notifications cannot restart capture, roll over, or change a terminal outcome or history");
+    }
+}
 void pendingInputRecoveryDoesNotConsumeAttempts()
 {
     Folder folder;
@@ -1573,6 +1711,9 @@ int main(int argc, char** argv)
         }
         if (argc == 2 && juce::String(argv[1]) == "--limits-only")
         {
+            delayedReopenCannotConsumeANewInterruptionsAllowance(false);
+            delayedReopenCannotConsumeANewInterruptionsAllowance(true);
+            oldReopenOutstandingAcrossResetHonorsDeadlineAndStop();
             slowInputReopenConsumesOnlyItsActualFailure();
             pendingInputRecoveryDoesNotConsumeAttempts();
             outstandingInputRecoveryHonorsDeadlineAndStop();
@@ -1648,6 +1789,9 @@ int main(int argc, char** argv)
         requiredLogAppendFailuresStopEvenDuringFinalization();
         headerAndRequiredLogFailuresPreserveBothNativeDiagnostics();
         pendingInputRecoveryDoesNotConsumeAttempts();
+        delayedReopenCannotConsumeANewInterruptionsAllowance(false);
+        delayedReopenCannotConsumeANewInterruptionsAllowance(true);
+        oldReopenOutstandingAcrossResetHonorsDeadlineAndStop();
         slowInputReopenConsumesOnlyItsActualFailure();
         outstandingInputRecoveryHonorsDeadlineAndStop();
         inputRecoveryFailuresSurviveOpeningAndRollover();

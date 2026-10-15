@@ -457,6 +457,12 @@ struct RecordingSession::Impl
     bool inputRecovering = false;
     // Protected by mutex; a request stays in flight until the writer collects its result.
     bool reopenInFlight = false, reopenStarted = false;
+    uint64_t recoveryInterruption = 1;
+    struct InputRecoveryAttempt
+    {
+        uint64_t interruption = 0;
+        unsigned number = 0;
+    } reopenAttempt;
     unsigned failedRecoveryAttempts = 0;
     std::atomic<double> actualRate { 0 }, writerRate { 0 };
     std::atomic<int> availableChannels { 0 };
@@ -621,14 +627,19 @@ struct RecordingSession::Impl
         if (reopenStarted)
         {
             reopenStarted = false;
-            events.push_back("Input recovery attempt " + juce::String(recoveryAttempts.load()));
+            events.push_back("Input recovery attempt " + juce::String(reopenAttempt.number)
+                + "; interruption=" + juce::String(reopenAttempt.interruption));
         }
         const auto outcome = std::exchange(reopenOutcome, ReopenOutcome::none);
         if (outcome == ReopenOutcome::none) return;
         reopenInFlight = false;
-        if (outcome == ReopenOutcome::failed && recoverySince != 0) ++failedRecoveryAttempts;
-        events.push_back(outcome == ReopenOutcome::reopened ? "Selected input reopened; waiting for saved incoming audio."
-            : "Selected input recovery attempt failed.");
+        const bool current = reopenAttempt.interruption == recoveryInterruption;
+        if (outcome == ReopenOutcome::failed && current && recoverySince != 0) ++failedRecoveryAttempts;
+        const juce::String message = outcome == ReopenOutcome::reopened ? "Selected input reopened" : "Selected input recovery attempt failed";
+        events.push_back(message + "; interruption=" + juce::String(reopenAttempt.interruption)
+            + "; attempt=" + juce::String(reopenAttempt.number)
+            + (!current ? "; earlier interruption; current allowance unchanged."
+                : outcome == ReopenOutcome::reopened ? "; waiting for saved incoming audio." : "."));
     }
     void logRecoveryOutcome()
     {
@@ -690,6 +701,7 @@ struct RecordingSession::Impl
                     + juce::String(monotonicMillis() - recoverySince) + "ms; missing audio omitted.");
                 recoverySince = 0; recoveryAttempts = 0; reopenRequested = false;
                 failedRecoveryAttempts = 0;
+                ++recoveryInterruption;
                 inputRecovering = false;
                 auto expected = State::recovering;
                 state.compare_exchange_strong(expected, State::recording);
@@ -946,6 +958,7 @@ RecorderResult RecordingSession::start()
         impl->recoverySince = 0; impl->recoveryAttempts = 0;
         impl->inputRecovering = false; impl->reopenOutcome = Impl::ReopenOutcome::none; impl->droppedFrames = 0;
         impl->reopenInFlight = false; impl->reopenStarted = false; impl->failedRecoveryAttempts = 0;
+        impl->recoveryInterruption = 1; impl->reopenAttempt = {};
         impl->pendingInputDetails.clear(); impl->lastInputDetail.clear();
         impl->startedAt = monotonicMillis(); impl->endedAt = 0; impl->lastCallback = impl->startedAt.load();
         impl->lastProgress = impl->startedAt;
@@ -1039,7 +1052,7 @@ bool RecordingSession::takeInputRecoveryRequest()
     if (impl->stopping || impl->terminalFailure || impl->reopenInFlight || !impl->reopenRequested.exchange(false)) return false;
     impl->reopenInFlight = true;
     impl->reopenStarted = true;
-    ++impl->recoveryAttempts;
+    impl->reopenAttempt = { impl->recoveryInterruption, ++impl->recoveryAttempts };
     return true;
 }
 void RecordingSession::inputRecoveryFinished(const RecorderResult& result)

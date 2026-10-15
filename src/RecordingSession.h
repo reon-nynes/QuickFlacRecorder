@@ -95,6 +95,8 @@ public:
     void retainInputDiagnostic(const juce::String&, uint64_t occurrences = 0);
     // Control thread. Starts one attempt; finish it before taking another request.
     // Reopen only the originally selected input. Pending requests do not consume attempts.
+    // Outstanding reopens remain serialized across saved-audio recovery resets;
+    // their results belong to the interruption in which the request was taken.
     bool takeInputRecoveryRequest();
     void inputRecoveryFinished(const RecorderResult&);
     void inputFormatChanged(double inputStreamRate, int availableInputChannels) noexcept;
