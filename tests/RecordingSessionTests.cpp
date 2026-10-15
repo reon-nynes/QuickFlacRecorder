@@ -789,11 +789,26 @@ void outstandingInputRecoveryHonorsDeadlineAndStop()
     for (const bool stop : { false, true })
     {
         Folder folder;
+        auto disk = std::make_shared<DiskControl>();
+        disk->blockFinalization = true;
         qfr::RecordingSession::Options options;
         options.callbackTimeout = std::chrono::seconds(5);
         options.recoveryInterval = std::chrono::milliseconds(25);
         options.noProgressTimeout = std::chrono::milliseconds(300);
+        options.outputAdapter = [disk](std::unique_ptr<juce::OutputStream> output)
+        {
+            return std::make_unique<ControlledDisk>(std::move(output), disk);
+        };
         qfr::RecordingSession session(options);
+        struct ReleaseFinalization
+        {
+            std::shared_ptr<DiskControl> disk;
+            ~ReleaseFinalization()
+            {
+                { std::lock_guard lock(disk->mutex); disk->release = true; }
+                disk->changed.notify_all();
+            }
+        } release { disk };
         require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start outstanding input recovery");
         const auto began = std::chrono::steady_clock::now();
         session.inputLost();
@@ -803,10 +818,15 @@ void outstandingInputRecoveryHonorsDeadlineAndStop()
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             session.requestStop();
         }
-        const auto deadline = began + std::chrono::seconds(2);
-        while (session.snapshot().controlsLocked() && std::chrono::steady_clock::now() < deadline)
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        require(!session.snapshot().controlsLocked(), "deadline or Stop terminates an outstanding request without its result");
+        {
+            std::unique_lock lock(disk->mutex);
+            require(disk->changed.wait_for(lock, std::chrono::seconds(2), [&] { return disk->enteredFinalization; }),
+                "deadline or Stop ends recovery without waiting for the outstanding result");
+        }
+        require(session.snapshot().state == qfr::RecordingSession::State::finalizing && !session.takeInputRecoveryRequest(),
+            "recovery has ended while slow FLAC finalization still locks the controls");
+        { std::lock_guard lock(disk->mutex); disk->release = true; }
+        disk->changed.notify_all();
         session.waitForStop();
         const auto outcome = session.snapshot();
         const auto log = outcome.logFile.loadFileAsString();
@@ -872,11 +892,32 @@ void inputRecoveryFailuresSurviveOpeningAndRollover()
 void savedAudioResetsActualInputRecoveryFailures()
 {
     Folder folder;
+    OperationGate reopenedLog, afterSavedAudio;
+    bool savedProgressLogged = false;
     qfr::RecordingSession::Options options;
     options.callbackTimeout = std::chrono::seconds(5);
     options.recoveryInterval = std::chrono::milliseconds(25);
     options.noProgressTimeout = std::chrono::seconds(2);
+    options.diskFlushInterval = std::chrono::milliseconds(1);
+    options.nativeError = [&](qfr::DiskOperation operation, const juce::File& file) -> uint64_t
+    {
+        if (operation != qfr::DiskOperation::flush) return 0;
+        if (file.hasFileExtension("log"))
+        {
+            const auto history = file.loadFileAsString();
+            if (history.contains("Selected input reopened")) reopenedLog.block();
+            if (history.contains("Recovery succeeded")) savedProgressLogged = true;
+        }
+        else if (savedProgressLogged) afterSavedAudio.block();
+        return 0;
+    };
     qfr::RecordingSession session(options);
+    struct ReleaseGates
+    {
+        OperationGate& reopenedLog;
+        OperationGate& afterSavedAudio;
+        ~ReleaseGates() { reopenedLog.release(); afterSavedAudio.release(); }
+    } release { reopenedLog, afterSavedAudio };
     require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start saved-audio recovery reset");
     session.inputLost();
     for (int attempt = 0; attempt < 2; ++attempt)
@@ -887,16 +928,19 @@ void savedAudioResetsActualInputRecoveryFailures()
     require(waitForInputRecovery(session), "reopen input after two failures");
     session.inputFormatChanged(48000, 1);
     session.inputRecoveryFinished({});
+    require(reopenedLog.wait(), "pause reopened-input log flush before invalid and valid audio arrive");
     session.processInput(nullptr, 0, 512);
     require(session.snapshot().recoveryAttempts == 3, "invalid incoming audio does not reset the allowance");
     std::array<float, 512> samples; samples.fill(.25f);
     const float* inputs[] { samples.data() };
     session.processInput(inputs, 1, 512);
-    const auto saved = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-    while (session.snapshot().recoveryAttempts != 0 && std::chrono::steady_clock::now() < saved)
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    reopenedLog.release();
+    // The next periodic disk flush follows savedProgress and another recovery
+    // service pass, so this also catches replay of the earlier invalid input.
+    require(afterSavedAudio.wait(), "writer services pending input faults after saving valid audio");
     require(session.snapshot().recoveryAttempts == 0 && session.snapshot().state == qfr::RecordingSession::State::recording,
         "successfully saving valid audio resets actual attempts and failures");
+    afterSavedAudio.release();
     session.inputLost();
     for (unsigned attempt = 1; attempt <= 3; ++attempt)
     {
@@ -916,6 +960,7 @@ void savedAudioResetsActualInputRecoveryFailures()
     require(reader->lengthInSamples == 512 && reader->read(&decoded, 0, 512, 0, true, false)
         && std::abs(decoded.getSample(0, 0) - .25f) < 1.f / 32768.f
         && logEventCount(log, "Recovery succeeded") == 1
+        && logEventCount(log, "Input device interrupted before already-saved incoming audio") == 1
         && logEventCount(log, "Input recovery attempt ") == 6
         && logEventCount(log, "Selected input recovery attempt failed") == 5,
         "real FLAC and recording log retain saved audio and both interruptions' actual recovery history");
@@ -1702,6 +1747,13 @@ int main(int argc, char** argv)
 {
     try
     {
+        if (argc == 2 && juce::String(argv[1]) == "--workflow-recovery-only")
+        {
+            outstandingInputRecoveryHonorsDeadlineAndStop();
+            savedAudioResetsActualInputRecoveryFailures();
+            std::cout << "PASS outstanding recovery and saved-audio reset\n";
+            return 0;
+        }
         if (argc == 2 && juce::String(argv[1]) == "--log-responsiveness-only")
         {
             recordingLogIoLeavesRecoveryControlsAvailable();

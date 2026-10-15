@@ -657,7 +657,16 @@ struct RecordingSession::Impl
         if (stopping || terminalFailure) return;
         if (failedRecoveryAttempts >= 3) { fail(Failure::inputLost); return; }
         if (inputFault.exchange(false))
-            beginRecovery(events, faultHead, "Input device interrupted");
+        {
+            const auto threshold = faultHead.load();
+            // A notification can arrive while the writer is persisting a log
+            // event. Audio saved beyond its capture position already recovered
+            // that interruption; do not replay it after savedProgress reset it.
+            if (threshold >= tail.load())
+                beginRecovery(events, threshold, "Input device interrupted");
+            else
+                events.push_back("Input device interrupted before already-saved incoming audio; recording gap duration unknown.");
+        }
         if (!inputRecovering && monotonicMillis() - lastCallback >= options.callbackTimeout.count())
         {
             auto expected = Failure::none;
