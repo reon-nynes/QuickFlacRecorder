@@ -177,7 +177,10 @@ public:
     {
         if (control->failNextFlush.exchange(false) || control->failFlushes) throw std::runtime_error("disk flush refused");
         output->flush();
-        control->flushedBytes = output->getPosition();
+        {
+            std::lock_guard lock(control->mutex);
+            control->flushedBytes = output->getPosition();
+        }
         control->changed.notify_all();
     }
     juce::int64 getPosition() override { return output->getPosition(); }
@@ -223,12 +226,16 @@ qfr::RecordingSession::Options diskOptions(std::shared_ptr<DiskControl> control,
     options.recoveryInterval = std::chrono::milliseconds(40);
     return options;
 }
-void periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive()
+void periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive(bool delayedObservation = false)
 {
     Folder folder;
     auto disk = std::make_shared<DiskControl>();
     auto options = diskOptions(disk);
     options.diskFlushInterval = std::chrono::milliseconds(20);
+    // This test pauses synthetic input while waiting for two disk flushes.
+    // Keep input recovery outside those bounded waits, even on a slow runner.
+    options.callbackTimeout = std::chrono::seconds(10);
+    options.noProgressTimeout = std::chrono::seconds(10);
     qfr::RecordingSession session(options);
     require(session.configure(config(folder)).wasOk() && session.start().wasOk(), "start periodically flushed recording");
     const auto partial = session.snapshot().recordingFile;
@@ -242,14 +249,18 @@ void periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive()
     };
     session.processInput(inputs, 1, 16384);
     const bool firstFlush = waitForFlushedGrowth(initialBytes);
+    if (delayedObservation) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     const auto firstBytes = partial.getSize();
     const bool stillRecording = session.snapshot().state == qfr::RecordingSession::State::recording;
     session.processInput(inputs, 1, 16384);
     const bool secondFlush = firstFlush && waitForFlushedGrowth(firstBytes);
     const auto secondBytes = partial.getSize();
     session.requestStop(); session.waitForStop();
-    require(firstFlush && stillRecording && firstBytes > initialBytes && secondFlush && secondBytes > firstBytes,
-            "periodic output flush exposes growing encoded partial audio while capture remains active");
+    require(firstFlush, "first periodic output flush completes before the deadline");
+    require(firstBytes > initialBytes, "first periodic output flush exposes encoded partial audio");
+    require(stillRecording, "capture remains active while waiting to observe periodic output flushing");
+    require(secondFlush, "second periodic output flush completes before the deadline");
+    require(secondBytes > firstBytes, "second periodic output flush exposes growing encoded partial audio");
     const auto outcome = session.snapshot();
     require(outcome.state == qfr::RecordingSession::State::succeeded && !partial.existsAsFile()
             && decode(outcome.recordingFile)->lengthInSamples == 32768,
@@ -1747,6 +1758,14 @@ int main(int argc, char** argv)
 {
     try
     {
+        if (argc == 2 && juce::String(argv[1]) == "--periodic-flush-only")
+        {
+            periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive();
+            periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive(true);
+            periodicDiskFlushFailureRecoversAndFinalizes();
+            std::cout << "PASS periodic disk flush, delayed observation, and flush recovery\n";
+            return 0;
+        }
         if (argc == 2 && juce::String(argv[1]) == "--workflow-recovery-only")
         {
             outstandingInputRecoveryHonorsDeadlineAndStop();
@@ -1859,6 +1878,7 @@ int main(int argc, char** argv)
         metersAndSavesSelectedStereoInOrder();
         std::cout << "PASS selected stereo and idle/active meters\n";
         periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive();
+        periodicallyFlushesGrowingPartialAudioWhileTheTakeIsActive(true);
         std::cout << "PASS periodic disk flush and growing active partial audio\n";
         periodicDiskFlushFailureRecoversAndFinalizes();
         std::cout << "PASS periodic disk flush recovery and error log\n";
