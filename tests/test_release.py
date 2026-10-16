@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
+import zipfile
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -91,11 +93,10 @@ class PublicationTests(unittest.TestCase):
         self.packages = Path(self.directory.name)
         self.github = GitHubService()
         self.tag = "v1.2.3-rc.1"
-        for platform, name in [("windows", "QuickFlacRecorder-windows-x64.zip"),
-                               ("macos", "QuickFlacRecorder-macos-universal.zip"),
-                               ("linux", "QuickFlacRecorder-linux-x64.tar.gz")]:
+        for name in release.PACKAGES:
+            platform = next(platform for platform in ("windows", "macos", "linux") if platform in name)
             folder = self.packages / platform
-            folder.mkdir()
+            folder.mkdir(exist_ok=True)
             package = folder / name
             package.write_bytes(f"portable {platform}".encode())
             package.with_name(name + ".json").write_text(json.dumps({
@@ -115,9 +116,7 @@ class PublicationTests(unittest.TestCase):
         self.publish()
         self.assertFalse(self.github.release["draft"])
         self.assertTrue(self.github.release["prerelease"])
-        self.assertEqual(self.github.publications, [{
-            "QuickFlacRecorder-windows-x64.zip", "QuickFlacRecorder-macos-universal.zip",
-            "QuickFlacRecorder-linux-x64.tar.gz"}])
+        self.assertEqual(self.github.publications, [set(release.PACKAGES)])
 
     def test_interrupted_upload_stays_draft_and_rerun_fills_missing_downloads(self):
         self.github.upload_failure = "QuickFlacRecorder-macos-universal.zip"
@@ -146,7 +145,7 @@ class PublicationTests(unittest.TestCase):
         self.github.assets["owner-notes.txt"] = b"preserve this extra asset"
         before = dict(self.github.assets)
         self.publish()
-        self.assertEqual(len(self.github.assets), 4)
+        self.assertEqual(len(self.github.assets), len(release.PACKAGES) + 1)
         for name, data in before.items():
             self.assertEqual(self.github.assets[name], data)
 
@@ -164,6 +163,12 @@ class PublicationTests(unittest.TestCase):
 
     def test_missing_platform_cannot_create_a_release(self):
         (self.packages / "linux" / "QuickFlacRecorder-linux-x64.tar.gz").unlink()
+        with self.assertRaises(SystemExit):
+            self.publish()
+        self.assertEqual(self.github.mutations, [])
+
+    def test_missing_corresponding_source_cannot_create_a_release(self):
+        (self.packages / "windows" / "QuickFlacRecorder-windows-x64-support.zip").unlink()
         with self.assertRaises(SystemExit):
             self.publish()
         self.assertEqual(self.github.mutations, [])
@@ -249,6 +254,79 @@ class PublicationTests(unittest.TestCase):
         self.publish()
         for name, data in self.github.assets.items():
             self.assertIn(f"{hashlib.sha256(data).hexdigest()}  {name}", self.github.release["body"])
+
+
+class PackagingTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def test_zip_download_contains_only_the_app_and_preserves_bundle_resources_and_modes(self):
+        for name, application in list(release.APPLICATIONS.items())[:2]:
+            with self.subTest(package=name):
+                path = self.root / name
+                binary = application if name.startswith("QuickFlacRecorder-windows") else application + "/Contents/MacOS/QuickFlacRecorder"
+                files = {binary: b"executable", "LICENSE": b"license", "QuickFlacRecorder-source.zip": b"source"}
+                if application.endswith(".app"):
+                    files[application + "/Contents/Resources/en.lproj/InfoPlist.strings"] = b"permission"
+                    files[application + "/Contents/_CodeSignature/CodeResources"] = b"signature"
+                with zipfile.ZipFile(path, "w") as archive:
+                    for entry, data in files.items():
+                        info = zipfile.ZipInfo(entry)
+                        info.external_attr = 0o100755 << 16
+                        archive.writestr(info, data)
+                release.package_application(path)
+                with zipfile.ZipFile(path) as archive:
+                    self.assertEqual(set(archive.namelist()), {key for key in files if key.startswith(application)})
+                    self.assertEqual(archive.read(binary), b"executable")
+                    self.assertEqual(archive.getinfo(binary).external_attr >> 16, 0o100755)
+                with zipfile.ZipFile(self.root / release.support_name(name)) as archive:
+                    self.assertEqual(set(archive.namelist()), {"LICENSE", "QuickFlacRecorder-source.zip"})
+                    self.assertEqual(archive.read("QuickFlacRecorder-source.zip"), b"source")
+
+    def test_linux_download_contains_only_executable_appimage_with_permissions(self):
+        name = "QuickFlacRecorder-linux-x64.tar.gz"
+        path = self.root / name
+        files = {"./QuickFlacRecorder-x86_64.AppImage": b"appimage", "./LICENSE": b"license",
+                 "./QuickFlacRecorder-source.zip": b"source", "./licenses/Ubuntu/copyright": b"notice"}
+        with tarfile.open(path, "w:gz") as archive:
+            for entry, data in files.items():
+                info = tarfile.TarInfo(entry)
+                info.size = len(data)
+                info.mode = 0o755
+                archive.addfile(info, io.BytesIO(data))
+        release.package_application(path)
+        with tarfile.open(path) as archive:
+            self.assertEqual(archive.getnames(), ["QuickFlacRecorder-x86_64.AppImage"])
+            self.assertEqual(archive.getmembers()[0].mode, 0o755)
+            self.assertEqual(archive.extractfile(archive.getmembers()[0]).read(), b"appimage")
+        with zipfile.ZipFile(self.root / release.support_name(name)) as archive:
+            self.assertEqual(set(archive.namelist()), {"LICENSE", "QuickFlacRecorder-source.zip", "licenses/Ubuntu/copyright"})
+            self.assertEqual(archive.read("licenses/Ubuntu/copyright"), b"notice")
+
+    def test_repeated_split_cannot_overwrite_corresponding_source_with_empty_support(self):
+        path = self.root / "QuickFlacRecorder-windows-x64.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            for name in ("QuickFlacRecorder.exe", "LICENSE", "QuickFlacRecorder-source.zip"):
+                archive.writestr(name, name.encode())
+        release.package_application(path)
+        support = self.root / release.support_name(path.name)
+        original, original_support = path.read_bytes(), support.read_bytes()
+        with self.assertRaisesRegex(ValueError, "Missing license or corresponding source"):
+            release.package_application(path)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(support.read_bytes(), original_support)
+
+    def test_missing_application_preserves_original_archive(self):
+        path = self.root / "QuickFlacRecorder-windows-x64.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("LICENSE", "license")
+        original = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "Missing portable application"):
+            release.package_application(path)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse((self.root / release.support_name(path.name)).exists())
 
 
 class VersionTests(unittest.TestCase):

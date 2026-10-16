@@ -8,13 +8,62 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tarfile
+import tempfile
+import zipfile
 from urllib.error import HTTPError
 from urllib.parse import quote
 import urllib.request
 
 
-PACKAGES = ("QuickFlacRecorder-windows-x64.zip", "QuickFlacRecorder-macos-universal.zip",
-            "QuickFlacRecorder-linux-x64.tar.gz")
+APPLICATIONS = {
+    "QuickFlacRecorder-windows-x64.zip": "QuickFlacRecorder.exe",
+    "QuickFlacRecorder-macos-universal.zip": "QuickFlacRecorder.app",
+    "QuickFlacRecorder-linux-x64.tar.gz": "QuickFlacRecorder-x86_64.AppImage",
+}
+
+
+def support_name(name):
+    return name.removesuffix(".tar.gz").removesuffix(".zip") + "-support.zip"
+
+
+PACKAGES = (*APPLICATIONS, *(support_name(name) for name in APPLICATIONS))
+
+
+def package_application(package):
+    """Split a full preview into an application-only archive and matching support."""
+    application = APPLICATIONS[package.name]
+    with tempfile.TemporaryDirectory(dir=package.parent) as directory:
+        slim = Path(directory) / package.name
+        support = Path(directory) / support_name(package.name)
+        found = False
+        with zipfile.ZipFile(support, "w", zipfile.ZIP_DEFLATED) as records:
+            if package.suffix == ".zip":
+                with zipfile.ZipFile(package) as source, zipfile.ZipFile(slim, "w", zipfile.ZIP_DEFLATED) as output:
+                    for entry in source.infolist():
+                        is_app = entry.filename == application or entry.filename.startswith(application + "/")
+                        target = output if is_app else records
+                        target.writestr(entry, source.read(entry))
+                        found |= is_app and not entry.is_dir()
+            else:
+                with tarfile.open(package, "r:gz") as source, tarfile.open(slim, "w:gz") as output:
+                    for entry in source:
+                        if not entry.isfile():
+                            continue
+                        name = entry.name.removeprefix("./")
+                        with source.extractfile(entry) as stream:
+                            if name == application:
+                                entry.name = application
+                                output.addfile(entry, stream)
+                                found = True
+                            else:
+                                records.writestr(name, stream.read())
+            if found and not {"LICENSE", "QuickFlacRecorder-source.zip"}.issubset(records.namelist()):
+                raise ValueError(f"Missing license or corresponding source in {package.name}; expected a full preview package")
+        if not found:
+            raise ValueError(f"Missing portable application in {package.name}")
+        support.replace(package.with_name(support.name))
+        slim.replace(package)
 
 
 def sha256(stream):
@@ -159,8 +208,9 @@ def release_notes(args, packages):
     return ("Portable downloads for Windows 10/11 x64, macOS 12+ Intel/Apple Silicon, "
             "and Linux x64 with an Ubuntu 22.04 baseline.\n\n"
             f"Source commit: `{args.commit}`. Workflow run: {args.run_id}. "
-            "Each package includes matching application/JUCE source, license notices, launch instructions, "
-            "and application hashes.\n\n"
+            "Each platform archive contains only its portable application. Matching application/JUCE source, "
+            "license notices, launch instructions, inspection reports, and application hashes are in the "
+            "separate platform `-support.zip` downloads. Keep those materials when redistributing the app.\n\n"
             "Windows and Linux downloads have no publisher signature. The macOS app has an ad-hoc "
             "signature, with no Developer ID or notarization. CI inspection and startup checks do not "
             "establish real microphone, permission, or device behavior on every platform.\n\n"
@@ -210,6 +260,8 @@ def main():
     source.add_argument("--tag")
     source.add_argument("--version")
     version.add_argument("--github-output", type=Path)
+    packaging = commands.add_parser("package-app")
+    packaging.add_argument("--package", type=Path, required=True)
     manifest = commands.add_parser("manifest")
     publication = commands.add_parser("publish")
     for command in [manifest, publication]:
@@ -222,6 +274,11 @@ def main():
     publication.add_argument("--packages", type=Path, required=True)
     args = parser.parse_args()
     try:
+        if args.command == "package-app":
+            if args.package.name not in APPLICATIONS:
+                raise ValueError("Unexpected portable package name")
+            package_application(args.package)
+            return
         if args.command == "manifest":
             write_manifest(args)
             return

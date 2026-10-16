@@ -51,6 +51,24 @@ class WorkflowTests(unittest.TestCase):
                 checkout = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@"))
                 self.assertEqual(checkout["with"], {"ref": "${{ github.sha }}", "persist-credentials": "false"})
 
+    def test_tag_packages_split_support_before_recording_both_manifests(self):
+        for platform, archive in [("windows", "QuickFlacRecorder-windows-x64.zip"),
+                                  ("macos", "QuickFlacRecorder-macos-universal.zip"),
+                                  ("linux", "QuickFlacRecorder-linux-x64.tar.gz")]:
+            with self.subTest(platform=platform):
+                steps = self.jobs[platform]["steps"]
+                step = next(step for step in steps if "package-app" in step.get("run", ""))
+                self.assertEqual(step["if"], "github.event_name == 'push' && github.ref_type == 'tag'")
+                commands = step["run"].splitlines()
+                support = archive.removesuffix(".tar.gz").removesuffix(".zip") + "-support.zip"
+                self.assertIn(f"package-app --package dist/{archive}", commands[0])
+                self.assertIn(f"manifest --tag", commands[1])
+                self.assertTrue(commands[1].endswith(f"--package dist/{archive}"))
+                self.assertTrue(commands[2].endswith(f"--package dist/{support}"))
+                upload = next(step["with"] for step in steps if step.get("uses", "").startswith("actions/upload-artifact@"))
+                self.assertEqual(set(upload["path"].splitlines()),
+                                 {f"dist/{name}{suffix}" for name in (archive, support) for suffix in ("", ".json")})
+
 
 if __name__ == "__main__":
     unittest.main()

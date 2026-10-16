@@ -4,7 +4,7 @@ Pushing a valid `v*` version tag approves publication of its source as a public 
 
 The [build, package, and release workflow](../.github/workflows/preview.yml) checks out the tag event's exact commit. It validates the version, runs release-tooling checks, builds and tests Windows, macOS, and Linux, inspects and packages the applications, and checks the Linux AppImage in a fresh Ubuntu 22.04 runtime container. The publishing job requires every check to succeed. A failed or skipped platform job cannot produce a newly public release.
 
-The release contains these three downloads:
+The release contains these three application downloads:
 
 | Download | Portable application | Supported target |
 | --- | --- | --- |
@@ -12,7 +12,7 @@ The release contains these three downloads:
 | `QuickFlacRecorder-macos-universal.zip` | `QuickFlacRecorder.app` | macOS 12+, Intel and Apple Silicon |
 | `QuickFlacRecorder-linux-x64.tar.gz` | `QuickFlacRecorder-x86_64.AppImage` | Linux x64, Ubuntu 22.04+ baseline |
 
-These public downloads do not require GitHub sign-in and do not have the Actions artifacts' 30-day retention limit. Each package retains the existing license notices, corresponding application/JUCE source, `SOURCE.txt`, application SHA-256 record, and inspection evidence. Release notes also record archive SHA-256 hashes, the source commit, and workflow run. Follow the [launch instructions](preview.md) for the platform's unsigned-application requirements.
+These public downloads do not require GitHub sign-in and do not have the Actions artifacts' 30-day retention limit. Each platform archive contains only the executable, app bundle, or AppImage shown above. Matching `QuickFlacRecorder-windows-x64-support.zip`, `QuickFlacRecorder-macos-universal-support.zip`, and `QuickFlacRecorder-linux-x64-support.zip` downloads contain license notices, corresponding application/JUCE source, `SOURCE.txt`, application SHA-256 records, launch instructions, and inspection evidence. Keep the matching support materials when redistributing an application. Notices embedded inside the macOS bundle and Linux AppImage remain part of those applications. Release notes also record archive SHA-256 hashes, the source commit, and workflow run. Follow the [launch instructions](preview.md) for the platform's unsigned-application requirements.
 
 ## Version tags and application metadata
 
@@ -29,11 +29,11 @@ Branch and pull-request builds retain the default preview version `1.0.0` and pu
 
 ## Publication and reruns
 
-The publisher downloads the three named platform artifacts from the current workflow run. Each tag artifact includes a manifest with the package hash, tag, application version, source commit, and workflow run ID. Publication rejects missing or duplicate packages, mismatched manifests, changed package bytes, and a tag that no longer points at the built source. The Linux runtime job checks the same run's Linux artifact before publication.
+The publisher downloads the three named platform artifacts from the current workflow run. For tag pushes, each platform first splits its full preview package into an application-only archive and a support archive. Each tag artifact includes both archives and a manifest for each with its hash, tag, application version, source commit, and workflow run ID. Publication rejects missing or duplicate packages, mismatched manifests, changed package bytes, and a tag that no longer points at the built source. The Linux runtime job checks the same run's Linux artifact before publication.
 
-A new release starts as a draft. It becomes public only after all three assets are uploaded, downloaded again, and verified. An upload or verification failure leaves the new release in draft. Tag runs do not cancel a previous run for the same tag while it is publishing.
+A new release starts as a draft. It becomes public only after all six application and support assets are uploaded, downloaded again, and verified. An upload or verification failure leaves the new release in draft. Tag runs do not cancel a previous run for the same tag while it is publishing.
 
-To resume a failed upload, use GitHub Actions' **Re-run failed jobs** on the original tag run while its artifacts remain available. The publisher locates the existing draft or public release, verifies existing assets byte for byte, and uploads only missing downloads. It preserves other release assets and published release metadata. When publishing a draft, it refreshes generated release notes so their hashes and provenance describe the packages actually verified. An existing prerelease/release type mismatch fails for review rather than changing the release type.
+To resume a failed upload, use GitHub Actions' **Re-run failed jobs** on the original tag run while its artifacts remain available. The publisher locates the existing draft or public release, verifies existing assets byte for byte, and uploads only missing downloads. It preserves other release assets and published release metadata. Missing support archives fail publication before any release is created. When publishing a draft, it refreshes generated release notes so their hashes and provenance describe the packages actually verified. An existing prerelease/release type mismatch fails for review rather than changing the release type.
 
 An asset with the same filename and different contents causes failure. The publisher never deletes or replaces an asset, including one left by a failed upload. A new version tag is required for changed downloads. Rebuilding all jobs may change archive timestamps or signatures even for identical source, so reuse the original successful build artifacts when resuming publication. If those artifacts expire, a new version tag is the reliable way to publish rebuilt downloads.
 

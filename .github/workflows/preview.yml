@@ -61,7 +61,10 @@ jobs:
         if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           SOURCE_COMMIT: ${{ github.sha }}
-        run: python scripts/release.py manifest --tag "$env:GITHUB_REF_NAME" --commit "$env:SOURCE_COMMIT" --run-id "$env:GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-windows-x64.zip
+        run: |
+          python scripts/release.py package-app --package dist/QuickFlacRecorder-windows-x64.zip
+          python scripts/release.py manifest --tag "$env:GITHUB_REF_NAME" --commit "$env:SOURCE_COMMIT" --run-id "$env:GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-windows-x64.zip
+          python scripts/release.py manifest --tag "$env:GITHUB_REF_NAME" --commit "$env:SOURCE_COMMIT" --run-id "$env:GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-windows-x64-support.zip
       - name: Upload unsigned preview and inspection evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -69,6 +72,8 @@ jobs:
           path: |
             dist/QuickFlacRecorder-windows-x64.zip
             dist/QuickFlacRecorder-windows-x64.zip.json
+            dist/QuickFlacRecorder-windows-x64-support.zip
+            dist/QuickFlacRecorder-windows-x64-support.zip.json
           if-no-files-found: error
           retention-days: 30
 
@@ -97,7 +102,10 @@ jobs:
         if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           SOURCE_COMMIT: ${{ github.sha }}
-        run: python3 scripts/release.py manifest --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-macos-universal.zip
+        run: |
+          python3 scripts/release.py package-app --package dist/QuickFlacRecorder-macos-universal.zip
+          python3 scripts/release.py manifest --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-macos-universal.zip
+          python3 scripts/release.py manifest --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-macos-universal-support.zip
       - name: Upload unsigned preview and inspection evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -105,6 +113,8 @@ jobs:
           path: |
             dist/QuickFlacRecorder-macos-universal.zip
             dist/QuickFlacRecorder-macos-universal.zip.json
+            dist/QuickFlacRecorder-macos-universal-support.zip
+            dist/QuickFlacRecorder-macos-universal-support.zip.json
           if-no-files-found: error
           retention-days: 30
 
@@ -142,7 +152,10 @@ jobs:
         if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           SOURCE_COMMIT: ${{ github.sha }}
-        run: python3 scripts/release.py manifest --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-linux-x64.tar.gz
+        run: |
+          python3 scripts/release.py package-app --package dist/QuickFlacRecorder-linux-x64.tar.gz
+          python3 scripts/release.py manifest --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-linux-x64.tar.gz
+          python3 scripts/release.py manifest --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --run-id "$GITHUB_RUN_ID" --build build --package dist/QuickFlacRecorder-linux-x64-support.zip
       - name: Upload unsigned preview
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -150,6 +163,8 @@ jobs:
           path: |
             dist/QuickFlacRecorder-linux-x64.tar.gz
             dist/QuickFlacRecorder-linux-x64.tar.gz.json
+            dist/QuickFlacRecorder-linux-x64-support.zip
+            dist/QuickFlacRecorder-linux-x64-support.zip.json
           if-no-files-found: error
           retention-days: 30
 

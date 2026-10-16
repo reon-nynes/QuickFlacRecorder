@@ -1,12 +1,12 @@
 # Launch a portable download
 
-Download the package for your operating system from [GitHub Releases](https://github.com/reon-nynes/QuickFlacRecorder/releases) and extract it. For a branch or pull-request preview, download the artifact from its successful [workflow run](https://github.com/reon-nynes/QuickFlacRecorder/actions/workflows/preview.yml), extract GitHub's outer artifact archive, then extract the platform archive inside it. Each platform archive contains the portable application, this guide, licenses, source, and a SHA-256 record. Workflow artifacts require GitHub sign-in and expire after 30 days; public release downloads do not.
+Download the package for your operating system from [GitHub Releases](https://github.com/reon-nynes/QuickFlacRecorder/releases) and extract it. For a branch or pull-request preview, download the artifact from its successful [workflow run](https://github.com/reon-nynes/QuickFlacRecorder/actions/workflows/preview.yml), extract GitHub's outer artifact archive, then extract the platform archive inside it. Release platform archives contain only the portable application. The matching platform `-support.zip` release download contains this guide, licenses, source, inspection evidence, and a SHA-256 record. Branch and pull-request preview archives include those materials beside the application. Workflow artifacts require GitHub sign-in and expire after 30 days; public release downloads do not.
 
 Both previews and releases have no publisher certificate or macOS notarization. A valid version-tag push approves public release after every required CI job passes. The [release guide](releases.md) explains that policy and the [acceptance record](acceptance.md) tracks actual checks. Package inspection and CI success do not replace real microphone, permission, or device checks.
 
 ## Windows 10/11 x64
 
-Extract `QuickFlacRecorder-windows-x64.zip` to an ordinary writable folder and launch `QuickFlacRecorder.exe`. The executable includes its C++ runtime and FLAC codec. Keep the accompanying licenses and source archive when redistributing it.
+Extract `QuickFlacRecorder-windows-x64.zip` to an ordinary writable folder and launch `QuickFlacRecorder.exe`. The executable includes its C++ runtime and FLAC codec. Keep the licenses and source archive from the matching support download when redistributing it.
 
 Windows may show a SmartScreen unknown-publisher prompt for an unsigned preview. After checking that the download came from the expected repository and commit, use More info and Run anyway if those controls are available and you choose to run it. If local policy prevents unsigned applications, build from source or use a permitted environment.
 
